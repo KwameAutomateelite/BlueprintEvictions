@@ -1,15 +1,15 @@
-import hashlib
-import hmac
 import json
 import logging
 import os
 import tempfile
 from datetime import datetime, timezone
+from typing import Optional
 
 import httpx
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
+from weasyprint import HTML
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,9 +32,12 @@ configuration = Configuration(username=DROPBOX_SIGN_API_KEY)
 class SendSignatureRequest(BaseModel):
     signer_email: str
     signer_name: str
-    file_url: str
     document_name: str
-    record_id: str  # Airtable record ID for callback
+    record_id: str
+    notice_type: str
+    case_name: str
+    fields: dict  # Pre-filled notice fields (TENANT_NAMES, PROPERTY_ADDRESS, etc.)
+    file_url: Optional[str] = None  # Optional: if a PDF already exists
 
 
 class SendSignatureResponse(BaseModel):
@@ -46,17 +49,60 @@ class SendSignatureResponse(BaseModel):
 # --- Helpers ---
 
 
+def generate_notice_pdf(
+    notice_type: str,
+    case_name: str,
+    signer_name: str,
+    fields: dict,
+) -> str:
+    """Generate a PDF from notice fields and return the temp file path."""
+    rows = ""
+    for key, value in fields.items():
+        label = key.replace("_", " ").title()
+        val = value if value else ""
+        rows += f"<tr><td class='label'>{label}</td><td>{val}</td></tr>\n"
+
+    html_content = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  @page {{ size: letter; margin: 1in; }}
+  body {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12pt; color: #222; line-height: 1.5; }}
+  .header {{ text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 15px; }}
+  .header h1 {{ font-size: 18pt; margin: 0 0 5px 0; }}
+  .header h2 {{ font-size: 14pt; font-weight: normal; color: #555; margin: 0; }}
+  .meta {{ margin-bottom: 25px; font-size: 10pt; color: #666; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+  td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; vertical-align: top; }}
+  .label {{ font-weight: bold; width: 35%; color: #333; }}
+  .signature-block {{ margin-top: 60px; padding-top: 20px; }}
+  .sig-line {{ border-top: 1px solid #333; width: 60%; margin-top: 50px; padding-top: 5px; font-size: 10pt; color: #666; }}
+</style>
+</head><body>
+  <div class="header">
+    <h1>{notice_type}</h1>
+    <h2>{case_name}</h2>
+  </div>
+  <div class="meta">Generated: {datetime.now(timezone.utc).strftime("%B %d, %Y")} | Prepared for: {signer_name}</div>
+  <table>{rows}</table>
+  <div class="signature-block">
+    <div class="sig-line">Signature — {signer_name}</div>
+    <div class="sig-line" style="margin-top:30px;">Date</div>
+  </div>
+</body></html>"""
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp.close()
+    HTML(string=html_content).write_pdf(tmp.name)
+    return tmp.name
+
+
 async def download_file(url: str) -> str:
     """Download a file from URL to a temp path and return the path."""
     async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
         resp = await client.get(url)
         resp.raise_for_status()
 
-    suffix = ".pdf"
-    if ".docx" in url.lower():
-        suffix = ".docx"
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp.write(resp.content)
     tmp.close()
     return tmp.name
@@ -93,19 +139,25 @@ async def health():
 
 @app.post("/send-signature", response_model=SendSignatureResponse)
 async def send_signature(req: SendSignatureRequest):
-    """Download a PDF from file_url and send it to Dropbox Sign for e-signature."""
+    """Generate a PDF from notice fields (or download from URL) and send to Dropbox Sign."""
     logger.info(
         f"Sending signature request: {req.document_name} to {req.signer_email}"
     )
 
-    # Download the file
+    # Get PDF: either download from URL or generate from fields
     try:
-        file_path = await download_file(req.file_url)
+        if req.file_url:
+            file_path = await download_file(req.file_url)
+        else:
+            file_path = generate_notice_pdf(
+                notice_type=req.notice_type,
+                case_name=req.case_name,
+                signer_name=req.signer_name,
+                fields=req.fields,
+            )
     except Exception as e:
-        logger.error(f"Failed to download file from {req.file_url}: {e}")
-        raise HTTPException(
-            status_code=400, detail=f"Failed to download file: {str(e)}"
-        )
+        logger.error(f"Failed to prepare PDF: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to prepare PDF: {str(e)}")
 
     try:
         with ApiClient(configuration) as api_client:

@@ -4,3 +4,4 @@ httpx==0.28.1
 dropbox-sign==1.8.0
 pydantic==2.10.5
 python-multipart==0.0.20
+weasyprint==63.1
