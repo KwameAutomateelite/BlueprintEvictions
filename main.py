@@ -9,7 +9,11 @@ import httpx
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from weasyprint import HTML
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.lib import colors
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,44 +59,106 @@ def generate_notice_pdf(
     signer_name: str,
     fields: dict,
 ) -> str:
-    """Generate a PDF from notice fields and return the temp file path."""
-    rows = ""
-    for key, value in fields.items():
-        label = key.replace("_", " ").title()
-        val = value if value else ""
-        rows += f"<tr><td class='label'>{label}</td><td>{val}</td></tr>\n"
-
-    html_content = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-  @page {{ size: letter; margin: 1in; }}
-  body {{ font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12pt; color: #222; line-height: 1.5; }}
-  .header {{ text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 15px; }}
-  .header h1 {{ font-size: 18pt; margin: 0 0 5px 0; }}
-  .header h2 {{ font-size: 14pt; font-weight: normal; color: #555; margin: 0; }}
-  .meta {{ margin-bottom: 25px; font-size: 10pt; color: #666; }}
-  table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
-  td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; vertical-align: top; }}
-  .label {{ font-weight: bold; width: 35%; color: #333; }}
-  .signature-block {{ margin-top: 60px; padding-top: 20px; }}
-  .sig-line {{ border-top: 1px solid #333; width: 60%; margin-top: 50px; padding-top: 5px; font-size: 10pt; color: #666; }}
-</style>
-</head><body>
-  <div class="header">
-    <h1>{notice_type}</h1>
-    <h2>{case_name}</h2>
-  </div>
-  <div class="meta">Generated: {datetime.now(timezone.utc).strftime("%B %d, %Y")} | Prepared for: {signer_name}</div>
-  <table>{rows}</table>
-  <div class="signature-block">
-    <div class="sig-line">Signature — {signer_name}</div>
-    <div class="sig-line" style="margin-top:30px;">Date</div>
-  </div>
-</body></html>"""
-
+    """Generate a PDF from notice fields using reportlab and return the temp file path."""
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     tmp.close()
-    HTML(string=html_content).write_pdf(tmp.name)
+
+    doc = SimpleDocTemplate(
+        tmp.name,
+        pagesize=letter,
+        leftMargin=1 * inch,
+        rightMargin=1 * inch,
+        topMargin=1 * inch,
+        bottomMargin=1 * inch,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "NoticeTitle", parent=styles["Title"], fontSize=18, spaceAfter=4
+    )
+    subtitle_style = ParagraphStyle(
+        "NoticeSubtitle",
+        parent=styles["Normal"],
+        fontSize=14,
+        textColor=colors.HexColor("#555555"),
+        alignment=1,
+        spaceAfter=12,
+    )
+    meta_style = ParagraphStyle(
+        "NoticeMeta",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#666666"),
+        spaceAfter=20,
+    )
+    label_style = ParagraphStyle(
+        "FieldLabel", parent=styles["Normal"], fontSize=11, fontName="Helvetica-Bold"
+    )
+    value_style = ParagraphStyle(
+        "FieldValue", parent=styles["Normal"], fontSize=11
+    )
+    sig_style = ParagraphStyle(
+        "SigLabel",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#666666"),
+    )
+
+    elements = []
+
+    # Header
+    elements.append(Paragraph(notice_type, title_style))
+    elements.append(Paragraph(case_name, subtitle_style))
+
+    # Divider line via a thin table
+    divider = Table([[""]],  colWidths=[6.5 * inch])
+    divider.setStyle(TableStyle([
+        ("LINEBELOW", (0, 0), (-1, -1), 2, colors.HexColor("#333333")),
+    ]))
+    elements.append(divider)
+    elements.append(Spacer(1, 12))
+
+    # Meta
+    generated = datetime.now(timezone.utc).strftime("%B %d, %Y")
+    elements.append(
+        Paragraph(f"Generated: {generated} | Prepared for: {signer_name}", meta_style)
+    )
+
+    # Fields table
+    table_data = []
+    for key, value in fields.items():
+        label = key.replace("_", " ").title()
+        val = str(value) if value else ""
+        table_data.append([
+            Paragraph(label, label_style),
+            Paragraph(val, value_style),
+        ])
+
+    if table_data:
+        fields_table = Table(table_data, colWidths=[2.3 * inch, 4.2 * inch])
+        fields_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
+        ]))
+        elements.append(fields_table)
+
+    # Signature block
+    elements.append(Spacer(1, 60))
+
+    sig_line = Table([[""]], colWidths=[4 * inch])
+    sig_line.setStyle(TableStyle([
+        ("LINEABOVE", (0, 0), (-1, -1), 1, colors.HexColor("#333333")),
+    ]))
+    elements.append(sig_line)
+    elements.append(Paragraph(f"Signature — {signer_name}", sig_style))
+
+    elements.append(Spacer(1, 30))
+    elements.append(sig_line)
+    elements.append(Paragraph("Date", sig_style))
+
+    doc.build(elements)
     return tmp.name
 
 
