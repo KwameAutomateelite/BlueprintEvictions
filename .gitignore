@@ -1,7 +1,23 @@
+# Environment and secrets
 .env
+.mcp.json
+credentials.json
+token.json
+
+# Temporary/intermediate files
+.tmp/
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
 .venv/
 venv/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
