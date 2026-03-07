@@ -272,6 +272,7 @@ def convert_docx_to_pdf(docx_path: str) -> str:
             "--headless",
             "--norestore",
             "--nofirststartwizard",
+            "--infilter=writer8",
             "--convert-to",
             "pdf:writer_pdf_Export",
             "--outdir",
