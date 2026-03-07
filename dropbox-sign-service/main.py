@@ -1,13 +1,18 @@
+import io
 import json
 import logging
 import os
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Optional
+from xml.etree import ElementTree as ET
 
 import httpx
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
@@ -61,6 +66,53 @@ class SendSignatureResponse(BaseModel):
 # --- Helpers ---
 
 
+def _extract_branding_images(template_path: str) -> tuple:
+    """Extract logo and footer images from a docx template.
+
+    Returns (logo_bytes, footer_bytes) — either may be None if not found.
+    Identifies images by checking which XML part references them:
+    - Logo: referenced in header1.xml.rels or document.xml.rels
+    - Footer bar: referenced in footer1.xml.rels
+    """
+    NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+    IMAGE_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+
+    logo_bytes = None
+    footer_bytes = None
+
+    with zipfile.ZipFile(template_path, "r") as z:
+        names = z.namelist()
+
+        def _get_image_target(rels_path):
+            if rels_path not in names:
+                return None
+            tree = ET.fromstring(z.read(rels_path))
+            for rel in tree.findall(f"{{{NS}}}Relationship"):
+                if rel.get("Type") == IMAGE_TYPE:
+                    return "word/" + rel.get("Target")
+            return None
+
+        # Logo: try header first, then document body
+        logo_target = _get_image_target("word/_rels/header1.xml.rels")
+        if not logo_target:
+            logo_target = _get_image_target("word/_rels/document.xml.rels")
+
+        # Footer bar
+        footer_target = _get_image_target("word/_rels/footer1.xml.rels")
+
+        if logo_target and logo_target in names:
+            logo_bytes = z.read(logo_target)
+            logger.info(f"Extracted logo from {logo_target} ({len(logo_bytes)} bytes)")
+
+        if footer_target and footer_target in names:
+            footer_bytes = z.read(footer_target)
+            logger.info(
+                f"Extracted footer from {footer_target} ({len(footer_bytes)} bytes)"
+            )
+
+    return logo_bytes, footer_bytes
+
+
 def fill_template(notice_type: str, fields: dict) -> str:
     """Fill a Word template with field values and return the path to the filled .docx."""
     template_name = TEMPLATE_MAP.get(notice_type)
@@ -74,7 +126,17 @@ def fill_template(notice_type: str, fields: dict) -> str:
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
 
+    # Extract branding images before python-docx opens the file
+    logo_bytes, footer_bytes = _extract_branding_images(str(template_path))
+
     doc = Document(str(template_path))
+
+    # Insert logo as inline image at the top of the document body
+    if logo_bytes:
+        logo_para = doc.paragraphs[0].insert_paragraph_before("")
+        logo_run = logo_para.add_run()
+        logo_run.add_picture(io.BytesIO(logo_bytes), width=Inches(6.5))
+        logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # Replace {{PLACEHOLDER}} tags in paragraphs
     for paragraph in doc.paragraphs:
@@ -93,6 +155,13 @@ def fill_template(notice_type: str, fields: dict) -> str:
             if header_footer is not None:
                 for paragraph in header_footer.paragraphs:
                     _replace_in_paragraph(paragraph, fields)
+
+    # Insert footer bar as inline image at the bottom of the document body
+    if footer_bytes:
+        footer_para = doc.add_paragraph("")
+        footer_run = footer_para.add_run()
+        footer_run.add_picture(io.BytesIO(footer_bytes), width=Inches(6.5))
+        footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
     tmp.close()
