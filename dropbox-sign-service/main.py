@@ -181,8 +181,10 @@ def convert_docx_to_pdf(docx_path: str) -> str:
         [
             "libreoffice",
             "--headless",
+            "--norestore",
+            "--nofirststartwizard",
             "--convert-to",
-            "pdf",
+            "pdf:writer_pdf_Export",
             "--outdir",
             output_dir,
             docx_path,
