@@ -1,3 +1,4 @@
+print("STARTUP: importing stdlib...", flush=True)
 import io
 import json
 import logging
@@ -9,14 +10,20 @@ from pathlib import Path
 from typing import Optional
 from xml.etree import ElementTree as ET
 
+print("STARTUP: importing httpx...", flush=True)
 import httpx
+print("STARTUP: importing python-docx...", flush=True)
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
+print("STARTUP: importing dropbox-sign...", flush=True)
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
+print("STARTUP: importing fastapi...", flush=True)
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
+
+print("STARTUP: all imports OK", flush=True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +32,10 @@ app = FastAPI(title="Blueprint Evictions - Dropbox Sign Service", version="2.1.0
 
 # --- Config ---
 
+print("STARTUP: reading env vars...", flush=True)
+print(f"STARTUP: DROPBOX_SIGN_API_KEY set = {'DROPBOX_SIGN_API_KEY' in os.environ}", flush=True)
+print(f"STARTUP: AIRTABLE_API_KEY set = {'AIRTABLE_API_KEY' in os.environ}", flush=True)
+print(f"STARTUP: PORT = {os.environ.get('PORT', 'NOT SET')}", flush=True)
 DROPBOX_SIGN_API_KEY = os.environ["DROPBOX_SIGN_API_KEY"]
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appumajkmYLcMryFd")
