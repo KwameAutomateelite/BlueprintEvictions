@@ -1,24 +1,27 @@
+import io
 import json
 import logging
 import os
+import subprocess
 import tempfile
-from datetime import datetime, timezone
+import zipfile
+from pathlib import Path
 from typing import Optional
+from xml.etree import ElementTree as ET
 
 import httpx
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Inches
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from reportlab.lib import colors
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Blueprint Evictions - Dropbox Sign Service")
+app = FastAPI(title="Blueprint Evictions - Dropbox Sign Service", version="2.1.0")
 
 # --- Config ---
 
@@ -28,6 +31,16 @@ AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appumajkmYLcMryFd")
 AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID", "tblZbUGz8OTvFNh9i")
 
 configuration = Configuration(username=DROPBOX_SIGN_API_KEY)
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+TEMPLATE_MAP = {
+    "3-Day Pay or Quit": "3day_commercial_TEMPLATE.docx",
+    "3-Day Perform or Quit": "3day_perform_quit_TEMPLATE.docx",
+    "3-Day Quit": "3day_quit_notice_TEMPLATE.docx",
+    "TPO Warning": "tpo_warning_TEMPLATE.docx",
+    "TPA Warning": "tpa_warning_TEMPLATE.docx",
+}
 
 
 # --- Models ---
@@ -40,8 +53,8 @@ class SendSignatureRequest(BaseModel):
     record_id: str
     notice_type: str
     case_name: str
-    fields: dict  # Pre-filled notice fields (TENANT_NAMES, PROPERTY_ADDRESS, etc.)
-    file_url: Optional[str] = None  # Optional: if a PDF already exists
+    fields: dict
+    file_url: Optional[str] = None
 
 
 class SendSignatureResponse(BaseModel):
@@ -53,113 +66,240 @@ class SendSignatureResponse(BaseModel):
 # --- Helpers ---
 
 
-def generate_notice_pdf(
-    notice_type: str,
-    case_name: str,
-    signer_name: str,
-    fields: dict,
-) -> str:
-    """Generate a PDF from notice fields using reportlab and return the temp file path."""
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+def _extract_branding_images(template_path: str) -> tuple:
+    """Extract logo and footer images from a docx template.
+
+    Returns (logo_bytes, footer_bytes) — either may be None if not found.
+    Identifies images by checking which XML part references them:
+    - Logo: referenced in header1.xml.rels or document.xml.rels
+    - Footer bar: referenced in footer1.xml.rels
+    """
+    NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+    IMAGE_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+
+    logo_bytes = None
+    footer_bytes = None
+
+    with zipfile.ZipFile(template_path, "r") as z:
+        names = z.namelist()
+
+        def _get_image_target(rels_path):
+            if rels_path not in names:
+                return None
+            tree = ET.fromstring(z.read(rels_path))
+            for rel in tree.findall(f"{{{NS}}}Relationship"):
+                if rel.get("Type") == IMAGE_TYPE:
+                    return "word/" + rel.get("Target")
+            return None
+
+        # Logo: try header first, then document body
+        logo_target = _get_image_target("word/_rels/header1.xml.rels")
+        if not logo_target:
+            logo_target = _get_image_target("word/_rels/document.xml.rels")
+
+        # Footer bar
+        footer_target = _get_image_target("word/_rels/footer1.xml.rels")
+
+        if logo_target and logo_target in names:
+            logo_bytes = z.read(logo_target)
+            logger.info(f"Extracted logo from {logo_target} ({len(logo_bytes)} bytes)")
+
+        if footer_target and footer_target in names:
+            footer_bytes = z.read(footer_target)
+            logger.info(
+                f"Extracted footer from {footer_target} ({len(footer_bytes)} bytes)"
+            )
+
+    return logo_bytes, footer_bytes
+
+
+def fill_template(notice_type: str, fields: dict) -> str:
+    """Fill a Word template with field values and return the path to the filled .docx."""
+    template_name = TEMPLATE_MAP.get(notice_type)
+    if not template_name:
+        raise ValueError(
+            f"Unknown notice_type '{notice_type}'. "
+            f"Valid types: {', '.join(TEMPLATE_MAP.keys())}"
+        )
+
+    template_path = TEMPLATES_DIR / template_name
+    logger.info(f"DEBUG template_path: {template_path}")
+    logger.info(f"DEBUG template_path.exists(): {template_path.exists()}")
+    logger.info(f"DEBUG TEMPLATES_DIR contents: {list(TEMPLATES_DIR.iterdir()) if TEMPLATES_DIR.exists() else 'DIR NOT FOUND'}")
+    if not template_path.exists():
+        raise FileNotFoundError(f"Template not found: {template_path}")
+
+    # Extract footer bar image from the docx template
+    _logo_bytes, footer_bytes = _extract_branding_images(str(template_path))
+
+    doc = Document(str(template_path))
+    logger.info(f"DEBUG paragraphs count: {len(doc.paragraphs)}")
+    for i, p in enumerate(doc.paragraphs[:5]):
+        logger.info(f"DEBUG para[{i}]: {p.text[:120]!r}")
+
+    # Insert the static Blueprint Evictions logo at the top of every document
+    logo_path = TEMPLATES_DIR / "blueprint_logo.jpg"
+    if logo_path.exists():
+        logo_para = doc.paragraphs[0].insert_paragraph_before("")
+        logo_run = logo_para.add_run()
+        logo_run.add_picture(str(logo_path), width=Inches(3.0))
+        logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Replace {{PLACEHOLDER}} tags in paragraphs
+    for paragraph in doc.paragraphs:
+        _replace_in_paragraph(paragraph, fields)
+
+    # Replace in tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    _replace_in_paragraph(paragraph, fields)
+
+    # Replace in headers/footers
+    for section in doc.sections:
+        for header_footer in [section.header, section.footer]:
+            if header_footer is not None:
+                for paragraph in header_footer.paragraphs:
+                    _replace_in_paragraph(paragraph, fields)
+
+    # Insert footer bar as inline image at the bottom of the document body
+    if footer_bytes:
+        footer_para = doc.add_paragraph("")
+        footer_run = footer_para.add_run()
+        footer_run.add_picture(io.BytesIO(footer_bytes), width=Inches(6.5))
+        footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
     tmp.close()
-
-    doc = SimpleDocTemplate(
-        tmp.name,
-        pagesize=letter,
-        leftMargin=1 * inch,
-        rightMargin=1 * inch,
-        topMargin=1 * inch,
-        bottomMargin=1 * inch,
-    )
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "NoticeTitle", parent=styles["Title"], fontSize=18, spaceAfter=4
-    )
-    subtitle_style = ParagraphStyle(
-        "NoticeSubtitle",
-        parent=styles["Normal"],
-        fontSize=14,
-        textColor=colors.HexColor("#555555"),
-        alignment=1,
-        spaceAfter=12,
-    )
-    meta_style = ParagraphStyle(
-        "NoticeMeta",
-        parent=styles["Normal"],
-        fontSize=10,
-        textColor=colors.HexColor("#666666"),
-        spaceAfter=20,
-    )
-    label_style = ParagraphStyle(
-        "FieldLabel", parent=styles["Normal"], fontSize=11, fontName="Helvetica-Bold"
-    )
-    value_style = ParagraphStyle(
-        "FieldValue", parent=styles["Normal"], fontSize=11
-    )
-    sig_style = ParagraphStyle(
-        "SigLabel",
-        parent=styles["Normal"],
-        fontSize=10,
-        textColor=colors.HexColor("#666666"),
-    )
-
-    elements = []
-
-    # Header
-    elements.append(Paragraph(notice_type, title_style))
-    elements.append(Paragraph(case_name, subtitle_style))
-
-    # Divider line via a thin table
-    divider = Table([[""]],  colWidths=[6.5 * inch])
-    divider.setStyle(TableStyle([
-        ("LINEBELOW", (0, 0), (-1, -1), 2, colors.HexColor("#333333")),
-    ]))
-    elements.append(divider)
-    elements.append(Spacer(1, 12))
-
-    # Meta
-    generated = datetime.now(timezone.utc).strftime("%B %d, %Y")
-    elements.append(
-        Paragraph(f"Generated: {generated} | Prepared for: {signer_name}", meta_style)
-    )
-
-    # Fields table
-    table_data = []
-    for key, value in fields.items():
-        label = key.replace("_", " ").title()
-        val = str(value) if value else ""
-        table_data.append([
-            Paragraph(label, label_style),
-            Paragraph(val, value_style),
-        ])
-
-    if table_data:
-        fields_table = Table(table_data, colWidths=[2.3 * inch, 4.2 * inch])
-        fields_table.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
-        ]))
-        elements.append(fields_table)
-
-    # Signature block
-    elements.append(Spacer(1, 60))
-
-    sig_line = Table([[""]], colWidths=[4 * inch])
-    sig_line.setStyle(TableStyle([
-        ("LINEABOVE", (0, 0), (-1, -1), 1, colors.HexColor("#333333")),
-    ]))
-    elements.append(sig_line)
-    elements.append(Paragraph(f"Signature — {signer_name}", sig_style))
-
-    elements.append(Spacer(1, 30))
-    elements.append(sig_line)
-    elements.append(Paragraph("Date", sig_style))
-
-    doc.build(elements)
+    doc.save(tmp.name)
+    logger.info(f"DEBUG saved filled docx: {tmp.name} size={os.path.getsize(tmp.name)}")
     return tmp.name
+
+
+def _replace_in_paragraph(paragraph, fields: dict) -> None:
+    """Replace {{KEY}} placeholders in a paragraph while preserving formatting.
+
+    Handles two cases:
+    1. Placeholder fits entirely within one run → replace in-place, formatting preserved.
+    2. Placeholder spans multiple runs (Word splits text unpredictably) → merge only
+       the affected runs into the first one, replace there, clear the rest.
+    """
+    runs = paragraph.runs
+    if not runs:
+        return
+
+    full_text = "".join(run.text for run in runs)
+    if "{{" not in full_text:
+        return
+
+    # Build list of placeholders to replace
+    replacements = {}
+    for key, value in fields.items():
+        placeholder = "{{" + key + "}}"
+        if placeholder in full_text:
+            replacements[placeholder] = str(value) if value else ""
+
+    if not replacements:
+        return
+
+    # Pass 1: Replace placeholders that fit within a single run
+    for run in runs:
+        for placeholder, value in replacements.items():
+            if placeholder in run.text:
+                run.text = run.text.replace(placeholder, value)
+
+    # Check if any placeholders still remain (they span multiple runs)
+    full_text_after = "".join(run.text for run in runs)
+    remaining = {p: v for p, v in replacements.items() if p in full_text_after}
+
+    if not remaining:
+        return
+
+    # Pass 2: Handle cross-run placeholders by finding the run span
+    for placeholder, value in remaining.items():
+        while True:
+            # Rebuild positions each iteration since runs change
+            texts = [run.text for run in runs]
+            combined = "".join(texts)
+            pos = combined.find(placeholder)
+            if pos < 0:
+                break
+
+            # Find which runs the placeholder spans
+            char_count = 0
+            start_run = end_run = None
+            for i, t in enumerate(texts):
+                run_start = char_count
+                run_end = char_count + len(t)
+                if start_run is None and pos < run_end:
+                    start_run = i
+                    offset_in_start = pos - run_start
+                if start_run is not None and pos + len(placeholder) <= run_end:
+                    end_run = i
+                    offset_in_end = pos + len(placeholder) - run_start
+                    break
+                char_count = run_end
+
+            if start_run is None or end_run is None:
+                break
+
+            # Merge the spanned text into the start run, replace, clear others
+            merged = "".join(texts[start_run : end_run + 1])
+            runs[start_run].text = merged.replace(placeholder, value, 1)
+            for j in range(start_run + 1, end_run + 1):
+                runs[j].text = ""
+
+
+def convert_docx_to_pdf(docx_path: str) -> str:
+    """Convert a .docx file to PDF using LibreOffice and return the PDF path."""
+    logger.info(f"DEBUG convert_docx_to_pdf input: {docx_path} size={os.path.getsize(docx_path)}")
+    output_dir = os.path.dirname(docx_path)
+    result = subprocess.run(
+        [
+            "libreoffice",
+            "--headless",
+            "--norestore",
+            "--nofirststartwizard",
+            "--convert-to",
+            "pdf:writer_pdf_Export",
+            "--outdir",
+            output_dir,
+            docx_path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    if result.returncode != 0:
+        logger.error(f"LibreOffice conversion failed: {result.stderr}")
+        raise RuntimeError(f"PDF conversion failed: {result.stderr}")
+
+    pdf_path = docx_path.rsplit(".", 1)[0] + ".pdf"
+    if not os.path.exists(pdf_path):
+        raise RuntimeError(
+            f"PDF not created at expected path: {pdf_path}. "
+            f"LibreOffice stdout: {result.stdout}"
+        )
+
+    logger.info(f"DEBUG PDF created: {pdf_path} size={os.path.getsize(pdf_path)}")
+    logger.info(f"DEBUG LibreOffice stdout: {result.stdout}")
+    logger.info(f"DEBUG LibreOffice stderr: {result.stderr}")
+    return pdf_path
+
+
+def generate_notice_pdf(notice_type: str, fields: dict) -> str:
+    """Fill a Word template and convert to PDF. Returns the PDF temp file path."""
+    docx_path = fill_template(notice_type, fields)
+    try:
+        pdf_path = convert_docx_to_pdf(docx_path)
+        return pdf_path
+    finally:
+        try:
+            os.unlink(docx_path)
+        except OSError:
+            pass
 
 
 async def download_file(url: str) -> str:
@@ -203,27 +343,98 @@ async def health():
     return {"status": "ok", "service": "dropbox-sign-service"}
 
 
+@app.get("/debug-template")
+async def debug_template():
+    """Debug endpoint: run template pipeline and return diagnostics."""
+    info = {}
+    info["TEMPLATES_DIR"] = str(TEMPLATES_DIR)
+    info["TEMPLATES_DIR_exists"] = TEMPLATES_DIR.exists()
+    info["TEMPLATES_DIR_contents"] = [f.name for f in TEMPLATES_DIR.iterdir()] if TEMPLATES_DIR.exists() else []
+
+    template_name = "3day_commercial_TEMPLATE.docx"
+    template_path = TEMPLATES_DIR / template_name
+    info["template_path"] = str(template_path)
+    info["template_exists"] = template_path.exists()
+    info["template_size"] = os.path.getsize(str(template_path)) if template_path.exists() else 0
+
+    logo_path = TEMPLATES_DIR / "blueprint_logo.jpg"
+    info["logo_path"] = str(logo_path)
+    info["logo_exists"] = logo_path.exists()
+    info["logo_size"] = os.path.getsize(str(logo_path)) if logo_path.exists() else 0
+
+    if template_path.exists():
+        doc = Document(str(template_path))
+        info["paragraph_count"] = len(doc.paragraphs)
+        info["first_5_paragraphs"] = [p.text[:150] for p in doc.paragraphs[:5]]
+        info["table_count"] = len(doc.tables)
+
+        # Test fill + convert
+        try:
+            fields = {"TENANT_NAMES": "DEBUG_TENANT", "COUNTY": "DEBUG_COUNTY"}
+            docx_path = fill_template("3-Day Pay or Quit", fields)
+            info["filled_docx_size"] = os.path.getsize(docx_path)
+
+            pdf_path = convert_docx_to_pdf(docx_path)
+            info["pdf_size"] = os.path.getsize(pdf_path)
+            info["pdf_path"] = pdf_path
+
+            # Read first 200 bytes of PDF to confirm it's a real PDF
+            with open(pdf_path, "rb") as f:
+                header = f.read(200)
+            info["pdf_header"] = header[:50].decode("latin-1")
+
+            os.unlink(docx_path)
+            os.unlink(pdf_path)
+        except Exception as e:
+            info["error"] = str(e)
+
+    return info
+
+
+class TestPdfRequest(BaseModel):
+    notice_type: str
+    fields: dict
+
+
+@app.post("/test-pdf")
+async def test_pdf(req: TestPdfRequest):
+    """Generate a filled PDF from template and return it directly (no Dropbox Sign)."""
+    try:
+        pdf_path = generate_notice_pdf(notice_type=req.notice_type, fields=req.fields)
+    except Exception as e:
+        logger.error(f"test-pdf failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=f"{req.notice_type.replace(' ', '_')}.pdf",
+    )
+
+
 @app.post("/send-signature", response_model=SendSignatureResponse)
 async def send_signature(req: SendSignatureRequest):
-    """Generate a PDF from notice fields (or download from URL) and send to Dropbox Sign."""
+    """Fill a branded Word template (or download from URL) and send to Dropbox Sign."""
     logger.info(
         f"Sending signature request: {req.document_name} to {req.signer_email}"
     )
 
-    # Get PDF: either download from URL or generate from fields
+    # Get PDF: either download from URL or generate from template
+    logger.info(f"DEBUG file_url={req.file_url!r} notice_type={req.notice_type!r}")
+    logger.info(f"DEBUG fields keys={list(req.fields.keys())}")
     try:
         if req.file_url:
+            logger.info("DEBUG: Taking file_url download branch")
             file_path = await download_file(req.file_url)
         else:
+            logger.info("DEBUG: Taking template generation branch")
             file_path = generate_notice_pdf(
                 notice_type=req.notice_type,
-                case_name=req.case_name,
-                signer_name=req.signer_name,
                 fields=req.fields,
             )
     except Exception as e:
         logger.error(f"Failed to prepare PDF: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to prepare PDF: {str(e)}")
+    logger.info(f"DEBUG final file_path={file_path} size={os.path.getsize(file_path)}")
 
     try:
         with ApiClient(configuration) as api_client:
@@ -310,7 +521,7 @@ async def signature_callback(request: Request):
     # Respond to the callback test (Dropbox Sign sends this to verify the endpoint)
     if event_type == "callback_test":
         logger.info("Responding to callback_test with 'Hello API Event Received'")
-        return "Hello API Event Received"
+        return PlainTextResponse("Hello API Event Received")
 
     # Only act on all-signed events
     if event_type != "signature_request_all_signed":
