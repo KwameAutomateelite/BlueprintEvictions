@@ -343,6 +343,54 @@ async def health():
     return {"status": "ok", "service": "dropbox-sign-service"}
 
 
+@app.get("/debug-template")
+async def debug_template():
+    """Debug endpoint: run template pipeline and return diagnostics."""
+    info = {}
+    info["TEMPLATES_DIR"] = str(TEMPLATES_DIR)
+    info["TEMPLATES_DIR_exists"] = TEMPLATES_DIR.exists()
+    info["TEMPLATES_DIR_contents"] = [f.name for f in TEMPLATES_DIR.iterdir()] if TEMPLATES_DIR.exists() else []
+
+    template_name = "3day_commercial_TEMPLATE.docx"
+    template_path = TEMPLATES_DIR / template_name
+    info["template_path"] = str(template_path)
+    info["template_exists"] = template_path.exists()
+    info["template_size"] = os.path.getsize(str(template_path)) if template_path.exists() else 0
+
+    logo_path = TEMPLATES_DIR / "blueprint_logo.jpg"
+    info["logo_path"] = str(logo_path)
+    info["logo_exists"] = logo_path.exists()
+    info["logo_size"] = os.path.getsize(str(logo_path)) if logo_path.exists() else 0
+
+    if template_path.exists():
+        doc = Document(str(template_path))
+        info["paragraph_count"] = len(doc.paragraphs)
+        info["first_5_paragraphs"] = [p.text[:150] for p in doc.paragraphs[:5]]
+        info["table_count"] = len(doc.tables)
+
+        # Test fill + convert
+        try:
+            fields = {"TENANT_NAMES": "DEBUG_TENANT", "COUNTY": "DEBUG_COUNTY"}
+            docx_path = fill_template("3-Day Pay or Quit", fields)
+            info["filled_docx_size"] = os.path.getsize(docx_path)
+
+            pdf_path = convert_docx_to_pdf(docx_path)
+            info["pdf_size"] = os.path.getsize(pdf_path)
+            info["pdf_path"] = pdf_path
+
+            # Read first 200 bytes of PDF to confirm it's a real PDF
+            with open(pdf_path, "rb") as f:
+                header = f.read(200)
+            info["pdf_header"] = header[:50].decode("latin-1")
+
+            os.unlink(docx_path)
+            os.unlink(pdf_path)
+        except Exception as e:
+            info["error"] = str(e)
+
+    return info
+
+
 @app.post("/send-signature", response_model=SendSignatureResponse)
 async def send_signature(req: SendSignatureRequest):
     """Fill a branded Word template (or download from URL) and send to Dropbox Sign."""
