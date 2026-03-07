@@ -126,16 +126,17 @@ def fill_template(notice_type: str, fields: dict) -> str:
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
 
-    # Extract branding images before python-docx opens the file
-    logo_bytes, footer_bytes = _extract_branding_images(str(template_path))
+    # Extract footer bar image from the docx template
+    _logo_bytes, footer_bytes = _extract_branding_images(str(template_path))
 
     doc = Document(str(template_path))
 
-    # Insert logo as inline image at the top of the document body
-    if logo_bytes:
+    # Insert the static Blueprint Evictions logo at the top of every document
+    logo_path = TEMPLATES_DIR / "blueprint_logo.jpg"
+    if logo_path.exists():
         logo_para = doc.paragraphs[0].insert_paragraph_before("")
         logo_run = logo_para.add_run()
-        logo_run.add_picture(io.BytesIO(logo_bytes), width=Inches(6.5))
+        logo_run.add_picture(str(logo_path), width=Inches(3.0))
         logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # Replace {{PLACEHOLDER}} tags in paragraphs
