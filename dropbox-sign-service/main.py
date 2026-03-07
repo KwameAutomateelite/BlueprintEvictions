@@ -21,7 +21,7 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Blueprint Evictions - Dropbox Sign Service")
+app = FastAPI(title="Blueprint Evictions - Dropbox Sign Service", version="2.1.0")
 
 # --- Config ---
 
