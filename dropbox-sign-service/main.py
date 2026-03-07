@@ -15,7 +15,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
@@ -389,6 +389,26 @@ async def debug_template():
             info["error"] = str(e)
 
     return info
+
+
+class TestPdfRequest(BaseModel):
+    notice_type: str
+    fields: dict
+
+
+@app.post("/test-pdf")
+async def test_pdf(req: TestPdfRequest):
+    """Generate a filled PDF from template and return it directly (no Dropbox Sign)."""
+    try:
+        pdf_path = generate_notice_pdf(notice_type=req.notice_type, fields=req.fields)
+    except Exception as e:
+        logger.error(f"test-pdf failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        filename=f"{req.notice_type.replace(' ', '_')}.pdf",
+    )
 
 
 @app.post("/send-signature", response_model=SendSignatureResponse)
