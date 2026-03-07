@@ -123,6 +123,9 @@ def fill_template(notice_type: str, fields: dict) -> str:
         )
 
     template_path = TEMPLATES_DIR / template_name
+    logger.info(f"DEBUG template_path: {template_path}")
+    logger.info(f"DEBUG template_path.exists(): {template_path.exists()}")
+    logger.info(f"DEBUG TEMPLATES_DIR contents: {list(TEMPLATES_DIR.iterdir()) if TEMPLATES_DIR.exists() else 'DIR NOT FOUND'}")
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
 
@@ -130,6 +133,9 @@ def fill_template(notice_type: str, fields: dict) -> str:
     _logo_bytes, footer_bytes = _extract_branding_images(str(template_path))
 
     doc = Document(str(template_path))
+    logger.info(f"DEBUG paragraphs count: {len(doc.paragraphs)}")
+    for i, p in enumerate(doc.paragraphs[:5]):
+        logger.info(f"DEBUG para[{i}]: {p.text[:120]!r}")
 
     # Insert the static Blueprint Evictions logo at the top of every document
     logo_path = TEMPLATES_DIR / "blueprint_logo.jpg"
@@ -167,6 +173,7 @@ def fill_template(notice_type: str, fields: dict) -> str:
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
     tmp.close()
     doc.save(tmp.name)
+    logger.info(f"DEBUG saved filled docx: {tmp.name} size={os.path.getsize(tmp.name)}")
     return tmp.name
 
 
@@ -246,6 +253,7 @@ def _replace_in_paragraph(paragraph, fields: dict) -> None:
 
 def convert_docx_to_pdf(docx_path: str) -> str:
     """Convert a .docx file to PDF using LibreOffice and return the PDF path."""
+    logger.info(f"DEBUG convert_docx_to_pdf input: {docx_path} size={os.path.getsize(docx_path)}")
     output_dir = os.path.dirname(docx_path)
     result = subprocess.run(
         [
@@ -275,6 +283,9 @@ def convert_docx_to_pdf(docx_path: str) -> str:
             f"LibreOffice stdout: {result.stdout}"
         )
 
+    logger.info(f"DEBUG PDF created: {pdf_path} size={os.path.getsize(pdf_path)}")
+    logger.info(f"DEBUG LibreOffice stdout: {result.stdout}")
+    logger.info(f"DEBUG LibreOffice stderr: {result.stderr}")
     return pdf_path
 
 
@@ -340,10 +351,14 @@ async def send_signature(req: SendSignatureRequest):
     )
 
     # Get PDF: either download from URL or generate from template
+    logger.info(f"DEBUG file_url={req.file_url!r} notice_type={req.notice_type!r}")
+    logger.info(f"DEBUG fields keys={list(req.fields.keys())}")
     try:
         if req.file_url:
+            logger.info("DEBUG: Taking file_url download branch")
             file_path = await download_file(req.file_url)
         else:
+            logger.info("DEBUG: Taking template generation branch")
             file_path = generate_notice_pdf(
                 notice_type=req.notice_type,
                 fields=req.fields,
@@ -351,6 +366,7 @@ async def send_signature(req: SendSignatureRequest):
     except Exception as e:
         logger.error(f"Failed to prepare PDF: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to prepare PDF: {str(e)}")
+    logger.info(f"DEBUG final file_path={file_path} size={os.path.getsize(file_path)}")
 
     try:
         with ApiClient(configuration) as api_client:
