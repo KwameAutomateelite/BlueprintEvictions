@@ -139,6 +139,7 @@ def fill_template(notice_type: str, fields: dict) -> str:
     logger.info(f"DEBUG TEMPLATES_DIR contents: {list(TEMPLATES_DIR.iterdir()) if TEMPLATES_DIR.exists() else 'DIR NOT FOUND'}")
     if not template_path.exists():
         raise FileNotFoundError(f"Template not found: {template_path}")
+    logger.info(f"DEBUG template file size: {os.path.getsize(str(template_path))} bytes")
 
     # Extract footer bar image from the docx template
     _logo_bytes, footer_bytes = _extract_branding_images(str(template_path))
@@ -184,7 +185,30 @@ def fill_template(notice_type: str, fields: dict) -> str:
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
     tmp.close()
     doc.save(tmp.name)
-    logger.info(f"DEBUG saved filled docx: {tmp.name} size={os.path.getsize(tmp.name)}")
+    saved_size = os.path.getsize(tmp.name)
+    logger.info(f"DEBUG saved filled docx: {tmp.name} size={saved_size}")
+
+    # Validate the saved docx is not corrupt
+    if saved_size == 0:
+        raise RuntimeError(f"fill_template produced empty file: {tmp.name}")
+    with open(tmp.name, "rb") as f:
+        header = f.read(20)
+    logger.info(f"DEBUG docx header hex: {header.hex()}")
+    # Valid docx (ZIP) starts with PK (50 4b)
+    if not header.startswith(b"PK"):
+        raise RuntimeError(
+            f"fill_template produced invalid docx (not a ZIP). "
+            f"Size={saved_size}, header={header.hex()}"
+        )
+    # Re-open with python-docx to verify
+    try:
+        test_doc = Document(tmp.name)
+        logger.info(f"DEBUG docx validation OK: {len(test_doc.paragraphs)} paragraphs")
+    except Exception as e:
+        raise RuntimeError(
+            f"fill_template produced corrupt docx: {e}. Size={saved_size}"
+        )
+
     return tmp.name
 
 
