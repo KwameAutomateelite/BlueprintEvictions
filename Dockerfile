@@ -6,9 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev libcairo2 libglib2.0-0 \
     fonts-liberation fonts-dejavu-core fonts-freefont-ttf \
     libreoffice-writer libreoffice-java-common \
+    unoconv \
     && rm -rf /var/lib/apt/lists/*
 
 ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV HOME=/tmp
 
 WORKDIR /app
 COPY requirements.txt .
