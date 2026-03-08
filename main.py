@@ -266,38 +266,66 @@ def convert_docx_to_pdf(docx_path: str) -> str:
     """Convert a .docx file to PDF using LibreOffice and return the PDF path."""
     logger.info(f"DEBUG convert_docx_to_pdf input: {docx_path} size={os.path.getsize(docx_path)}")
     output_dir = os.path.dirname(docx_path)
+
+    # Verify /tmp is writable (Railway containers may have restrictions)
+    try:
+        test_file = os.path.join(output_dir, ".write_test")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.unlink(test_file)
+        logger.info(f"DEBUG output_dir {output_dir} is writable")
+    except Exception as e:
+        logger.error(f"DEBUG output_dir {output_dir} is NOT writable: {e}")
+
+    # LibreOffice needs a writable HOME for its user profile
+    lo_env = {
+        "HOME": "/tmp",
+        "PATH": os.environ.get("PATH", "/usr/bin:/usr/local/bin"),
+    }
+
+    cmd = [
+        "libreoffice",
+        "--headless",
+        "--norestore",
+        "--nofirststartwizard",
+        "--infilter=writer8",
+        "--convert-to",
+        "pdf:writer_pdf_Export",
+        "--outdir",
+        output_dir,
+        docx_path,
+    ]
+    logger.info(f"DEBUG LibreOffice cmd: {' '.join(cmd)}")
+
     result = subprocess.run(
-        [
-            "libreoffice",
-            "--headless",
-            "--norestore",
-            "--nofirststartwizard",
-            "--infilter=writer8",
-            "--convert-to",
-            "pdf:writer_pdf_Export",
-            "--outdir",
-            output_dir,
-            docx_path,
-        ],
+        cmd,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=120,
+        env=lo_env,
     )
 
+    logger.info(f"DEBUG LibreOffice returncode: {result.returncode}")
+    logger.info(f"DEBUG LibreOffice stdout: {result.stdout}")
+    logger.info(f"DEBUG LibreOffice stderr: {result.stderr}")
+
     if result.returncode != 0:
-        logger.error(f"LibreOffice conversion failed: {result.stderr}")
-        raise RuntimeError(f"PDF conversion failed: {result.stderr}")
+        raise RuntimeError(
+            f"PDF conversion failed (rc={result.returncode}). "
+            f"stdout: {result.stdout}. stderr: {result.stderr}"
+        )
 
     pdf_path = docx_path.rsplit(".", 1)[0] + ".pdf"
     if not os.path.exists(pdf_path):
+        # List output_dir contents to help debug
+        dir_contents = os.listdir(output_dir) if os.path.isdir(output_dir) else "DIR NOT FOUND"
         raise RuntimeError(
             f"PDF not created at expected path: {pdf_path}. "
-            f"LibreOffice stdout: {result.stdout}"
+            f"stdout: {result.stdout}. stderr: {result.stderr}. "
+            f"Dir contents: {dir_contents}"
         )
 
     logger.info(f"DEBUG PDF created: {pdf_path} size={os.path.getsize(pdf_path)}")
-    logger.info(f"DEBUG LibreOffice stdout: {result.stdout}")
-    logger.info(f"DEBUG LibreOffice stderr: {result.stderr}")
     return pdf_path
 
 
