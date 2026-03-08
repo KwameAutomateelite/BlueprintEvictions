@@ -287,41 +287,20 @@ def _replace_in_paragraph(paragraph, fields: dict) -> None:
 
 
 def convert_docx_to_pdf(docx_path: str) -> str:
-    """Convert a .docx file to PDF. Tries unoconv first, falls back to LibreOffice CLI."""
+    """Convert a .docx file to PDF using LibreOffice."""
     logger.info(f"DEBUG convert_docx_to_pdf input: {docx_path} size={os.path.getsize(docx_path)}")
     pdf_path = docx_path.rsplit(".", 1)[0] + ".pdf"
     output_dir = os.path.dirname(docx_path)
 
-    lo_env = {
-        "HOME": "/tmp",
-        "PATH": os.environ.get("PATH", "/usr/bin:/usr/local/bin"),
-        "JAVA_HOME": os.environ.get("JAVA_HOME", "/usr/lib/jvm/default-java"),
-    }
+    lo_env = os.environ.copy()
+    lo_env["HOME"] = "/tmp"
 
-    # Attempt 1: unoconv
-    logger.info("DEBUG: Trying unoconv...")
-    try:
-        result = subprocess.run(
-            ["unoconv", "-f", "pdf", "-o", pdf_path, docx_path],
-            capture_output=True, text=True, timeout=120, env=lo_env,
-        )
-        logger.info(f"DEBUG unoconv rc={result.returncode} stdout={result.stdout} stderr={result.stderr}")
-        if result.returncode == 0 and os.path.exists(pdf_path):
-            logger.info(f"DEBUG PDF created via unoconv: {pdf_path} size={os.path.getsize(pdf_path)}")
-            return pdf_path
-        logger.warning(f"unoconv failed (rc={result.returncode}), trying LibreOffice CLI...")
-    except FileNotFoundError:
-        logger.warning("unoconv not found, trying LibreOffice CLI...")
-    except subprocess.TimeoutExpired:
-        logger.warning("unoconv timed out, trying LibreOffice CLI...")
-
-    # Attempt 2: LibreOffice CLI
-    logger.info("DEBUG: Trying LibreOffice CLI...")
     cmd = [
         "libreoffice", "--headless", "--norestore", "--nofirststartwizard",
-        "--infilter=writer8", "--convert-to", "pdf:writer_pdf_Export",
-        "--outdir", output_dir, docx_path,
+        "--convert-to", "pdf", "--outdir", output_dir, docx_path,
     ]
+    logger.info(f"DEBUG LibreOffice cmd: {' '.join(cmd)}")
+
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=120, env=lo_env,
     )
@@ -330,12 +309,12 @@ def convert_docx_to_pdf(docx_path: str) -> str:
     if not os.path.exists(pdf_path):
         dir_contents = os.listdir(output_dir) if os.path.isdir(output_dir) else "DIR NOT FOUND"
         raise RuntimeError(
-            f"PDF conversion failed. unoconv and LibreOffice both failed. "
-            f"LO rc={result.returncode}. stdout: {result.stdout}. stderr: {result.stderr}. "
+            f"PDF conversion failed (rc={result.returncode}). "
+            f"stdout: {result.stdout}. stderr: {result.stderr}. "
             f"Dir contents: {dir_contents}"
         )
 
-    logger.info(f"DEBUG PDF created via LibreOffice: {pdf_path} size={os.path.getsize(pdf_path)}")
+    logger.info(f"DEBUG PDF created: {pdf_path} size={os.path.getsize(pdf_path)}")
     return pdf_path
 
 
