@@ -149,14 +149,6 @@ def fill_template(notice_type: str, fields: dict) -> str:
     for i, p in enumerate(doc.paragraphs[:5]):
         logger.info(f"DEBUG para[{i}]: {p.text[:120]!r}")
 
-    # Insert the static Blueprint Evictions logo at the top of every document
-    logo_path = TEMPLATES_DIR / "blueprint_logo.jpg"
-    if logo_path.exists():
-        logo_para = doc.paragraphs[0].insert_paragraph_before("")
-        logo_run = logo_para.add_run()
-        logo_run.add_picture(str(logo_path), width=Inches(3.0))
-        logo_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
     # Replace {{PLACEHOLDER}} tags in paragraphs
     for paragraph in doc.paragraphs:
         _replace_in_paragraph(paragraph, fields)
