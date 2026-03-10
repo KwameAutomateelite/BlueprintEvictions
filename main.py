@@ -44,6 +44,8 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 TEMPLATE_MAP = {
     "3-Day Pay or Quit": "3day_commercial_TEMPLATE.docx",
+    "3-Day Notice to Pay Rent or Quit": "3day_commercial_TEMPLATE.docx",
+    "3 Day Pay or Quit": "3day_commercial_TEMPLATE.docx",
     "3-Day Perform or Quit": "3day_perform_quit_TEMPLATE.docx",
     "3-Day Quit": "3day_quit_notice_TEMPLATE.docx",
     "TPO Warning": "tpo_warning_TEMPLATE.docx",
