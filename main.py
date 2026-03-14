@@ -5,7 +5,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 print("STARTUP: importing httpx...", flush=True)
 import httpx
@@ -17,7 +17,7 @@ print("STARTUP: importing dropbox-sign...", flush=True)
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 print("STARTUP: importing fastapi...", flush=True)
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 
 print("STARTUP: all imports OK", flush=True)
@@ -71,6 +71,40 @@ class SendSignatureResponse(BaseModel):
     signature_request_id: str
     status: str
     message: str
+
+
+class AmountDue(BaseModel):
+    due_date: str
+    amount: str
+
+
+class GenerateNoticeRequest(BaseModel):
+    notice_type: str  # "residential" or "commercial"
+    day_count: int  # 3, 5, 10, 15, 30
+    tenant_names: str
+    property_address: str
+    county: str
+    amounts_due: List[AmountDue]
+    total_amount_due: str
+    service_date: str = ""
+    payment_address: str = ""
+    landlord_name: str
+    landlord_phone: str = ""
+    landlord_address: str = ""
+    notice_date: str = ""
+    case_name: str = ""
+    is_section_8: bool = False
+    is_san_jose_tpo: bool = False
+    is_mountain_view_csfra: bool = False
+
+
+DAY_COUNT_WORDS = {
+    3: ("three", "THREE"),
+    5: ("five", "FIVE"),
+    10: ("ten", "TEN"),
+    15: ("fifteen", "FIFTEEN"),
+    30: ("thirty", "THIRTY"),
+}
 
 
 # --- Helpers ---
@@ -516,3 +550,183 @@ async def signature_callback(request: Request):
         "record_id": record_id,
         "signature_request_id": sig_request_id,
     }
+
+
+def _replace_day_count_in_text(text: str, day_count: int) -> str:
+    """Replace hardcoded day count references with the correct values."""
+    lower_word, upper_word = DAY_COUNT_WORDS.get(day_count, (str(day_count), str(day_count)))
+
+    # Title: "THREE (3)" → "{UPPER} ({N})"
+    text = text.replace("THREE (3)", f"{upper_word} ({day_count})")
+    # Body: "three (3)" → "{lower} ({N})"
+    text = text.replace("three (3)", f"{lower_word} ({day_count})")
+    # Reverse order: "3 (three)" → "{N} ({lower})"
+    text = text.replace("3 (three)", f"{day_count} ({lower_word})")
+    return text
+
+
+def _build_amounts_table(table, amounts_due: list) -> None:
+    """Populate the amounts due table with multiple rows.
+
+    The template has a single data row with {{RENT_DUE_DATE}} and {{AMOUNT_DUE}}.
+    We replace the first row's placeholders with the first amount,
+    then clone that row for each additional amount.
+    """
+    if not amounts_due:
+        return
+
+    # The table has header text in the first paragraphs of each cell,
+    # and placeholder text in the second paragraphs.
+    # Row 0 is the only row. Cell 0 = DUE DATE column, Cell 1 = AMOUNT DUE column.
+    row = table.rows[0]
+
+    # Replace placeholders in the first row with first amount
+    for cell in row.cells:
+        for paragraph in cell.paragraphs:
+            if "{{RENT_DUE_DATE}}" in paragraph.text:
+                # Build all due dates as newline-separated text
+                dates_text = "\n".join(a["due_date"] for a in amounts_due)
+                for run in paragraph.runs:
+                    if "{{RENT_DUE_DATE}}" in run.text:
+                        run.text = run.text.replace("{{RENT_DUE_DATE}}", dates_text)
+            if "{{AMOUNT_DUE}}" in paragraph.text:
+                amounts_text = "\n".join(a["amount"] for a in amounts_due)
+                for run in paragraph.runs:
+                    if "{{AMOUNT_DUE}}" in run.text:
+                        run.text = run.text.replace("{{AMOUNT_DUE}}", amounts_text)
+
+
+@app.post("/generate-notice")
+async def generate_notice(req: GenerateNoticeRequest):
+    """Generate a filled .docx eviction notice from template and return it."""
+    logger.info(f"generate-notice: type={req.notice_type} day_count={req.day_count} case={req.case_name}")
+
+    # Validate day count
+    if req.day_count not in DAY_COUNT_WORDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid day_count {req.day_count}. Must be one of: {list(DAY_COUNT_WORDS.keys())}",
+        )
+
+    # Select template — for now both use the same commercial template
+    # TODO: create separate residential template when available
+    template_name = "3day_commercial_TEMPLATE.docx"
+    template_path = TEMPLATES_DIR / template_name
+    if not template_path.exists():
+        raise HTTPException(status_code=500, detail=f"Template not found: {template_name}")
+
+    # Parse address into street and city/state/zip
+    addr_parts = req.property_address.rsplit(",", 2)
+    if len(addr_parts) >= 3:
+        street = addr_parts[0].strip()
+        city_state_zip = ",".join(addr_parts[1:]).strip()
+    elif len(addr_parts) == 2:
+        street = addr_parts[0].strip()
+        city_state_zip = addr_parts[1].strip()
+    else:
+        street = req.property_address
+        city_state_zip = ""
+
+    # Load template
+    doc = Document(str(template_path))
+
+    # --- Step 1: Replace day count in all text ---
+    for paragraph in doc.paragraphs:
+        full_text = "".join(run.text for run in paragraph.runs)
+        if "three" in full_text.lower() or "THREE" in full_text or "3 (three)" in full_text:
+            for run in paragraph.runs:
+                run.text = _replace_day_count_in_text(run.text, req.day_count)
+
+    # --- Step 2: Handle the amounts table (Table 0) ---
+    if doc.tables:
+        amounts_data = [{"due_date": a.due_date, "amount": a.amount} for a in req.amounts_due]
+        _build_amounts_table(doc.tables[0], amounts_data)
+
+    # --- Step 3: Replace standard placeholders ---
+    fields = {
+        "TENANT_NAMES": req.tenant_names,
+        "PROPERTY_ADDRESS_STREET": street,
+        "PROPERTY_ADDRESS_CITY": city_state_zip,
+        "COUNTY": req.county,
+        "TOTAL_AMOUNT_DUE": req.total_amount_due,
+        "LANDLORD_NAME": req.landlord_name,
+        "LANDLORD_COMPANY": "",  # Not in the request schema, leave blank
+        "LANDLORD_ADDRESS": req.landlord_address or req.payment_address,
+        "LANDLORD_PHONE": req.landlord_phone,
+        "DATE_SERVED": req.notice_date,
+    }
+
+    # Replace the service date blank
+    for paragraph in doc.paragraphs:
+        if "_________________" in paragraph.text:
+            for run in paragraph.runs:
+                if "_________________" in run.text:
+                    run.text = run.text.replace(
+                        "_________________",
+                        req.service_date if req.service_date else "_________________",
+                    )
+
+    # Replace {{KEY}} placeholders in paragraphs
+    for paragraph in doc.paragraphs:
+        _replace_in_paragraph(paragraph, fields)
+
+    # Replace in tables (for DATE_SERVED in Table 1)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    _replace_in_paragraph(paragraph, fields)
+
+    # Replace in headers/footers
+    for section in doc.sections:
+        for header_footer in [section.header, section.footer]:
+            if header_footer is not None:
+                for paragraph in header_footer.paragraphs:
+                    _replace_in_paragraph(paragraph, fields)
+
+    # Also handle payment address paragraph
+    for paragraph in doc.paragraphs:
+        if "tendered to, or possession of the premises delivered to:" in paragraph.text:
+            # The payment address is in the next paragraphs (already handled by LANDLORD_NAME etc.)
+            pass
+
+    # --- Step 4: Save to temp file ---
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
+    tmp.close()
+    doc.save(tmp.name)
+    file_size = os.path.getsize(tmp.name)
+    logger.info(f"generate-notice: saved {tmp.name} size={file_size}")
+
+    # --- Step 5: Build conditional attachments header ---
+    attachments = []
+    if req.is_section_8 and req.day_count == 30:
+        attachments.extend(["Attachment_1_HUD-5380.pdf", "Attachment_2_HUD-5382.pdf"])
+    if req.is_san_jose_tpo:
+        attachments.append("TPO_Required_Attachment.pdf")
+    if req.is_mountain_view_csfra:
+        attachments.append("Mountain_View_Attachment.pdf")
+
+    # --- Step 6: Return the .docx ---
+    safe_case_name = req.case_name.replace('"', '').replace("'", "") if req.case_name else "Notice"
+    filename = f"{req.day_count}-Day Notice - {safe_case_name}.docx"
+
+    with open(tmp.name, "rb") as f:
+        content = f.read()
+
+    # Clean up temp file
+    try:
+        os.unlink(tmp.name)
+    except OSError:
+        pass
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    if attachments:
+        headers["X-Attachments-Needed"] = ",".join(attachments)
+
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers=headers,
+    )
