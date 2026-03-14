@@ -43,13 +43,18 @@ configuration = Configuration(username=DROPBOX_SIGN_API_KEY)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 TEMPLATE_MAP = {
-    "3-Day Pay or Quit": "3day_commercial_TEMPLATE.docx",
-    "3-Day Notice to Pay Rent or Quit": "3day_commercial_TEMPLATE.docx",
-    "3 Day Pay or Quit": "3day_commercial_TEMPLATE.docx",
+    "3-Day Pay or Quit": "3-Day Notice - BLUEPRINT - commercial - NEW BRANDING_071125.docx",
+    "3-Day Notice to Pay Rent or Quit": "3-Day Notice - BLUEPRINT - commercial - NEW BRANDING_071125.docx",
+    "3 Day Pay or Quit": "3-Day Notice - BLUEPRINT - commercial - NEW BRANDING_071125.docx",
     "3-Day Perform or Quit": "3day_perform_quit_TEMPLATE.docx",
     "3-Day Quit": "3day_quit_notice_TEMPLATE.docx",
     "TPO Warning": "tpo_warning_TEMPLATE.docx",
     "TPA Warning": "tpa_warning_TEMPLATE.docx",
+}
+
+NOTICE_TEMPLATES = {
+    "residential": "3-Day Notice - BLUEPRINT - residential - NEW BRANDING_071125_v2.docx",
+    "commercial": "3-Day Notice - BLUEPRINT - commercial - NEW BRANDING_071125.docx",
 }
 
 
@@ -348,7 +353,7 @@ async def debug_template():
     info["TEMPLATES_DIR_exists"] = TEMPLATES_DIR.exists()
     info["TEMPLATES_DIR_contents"] = [f.name for f in TEMPLATES_DIR.iterdir()] if TEMPLATES_DIR.exists() else []
 
-    template_name = "3day_commercial_TEMPLATE.docx"
+    template_name = NOTICE_TEMPLATES["commercial"]
     template_path = TEMPLATES_DIR / template_name
     info["template_path"] = str(template_path)
     info["template_exists"] = template_path.exists()
@@ -552,48 +557,66 @@ async def signature_callback(request: Request):
     }
 
 
-def _replace_day_count_in_text(text: str, day_count: int) -> str:
-    """Replace hardcoded day count references with the correct values."""
+def _replace_day_count_in_paragraph(paragraph, day_count: int) -> None:
+    """Replace day count references in a paragraph, handling split runs.
+
+    Handles both single-run matches (e.g. 'three (3)') and split-run
+    matches where 'THREE', ' ', '(3)' are in separate runs.
+    """
+    if day_count == 3:
+        return  # Template already says "three (3)", nothing to replace
+
     lower_word, upper_word = DAY_COUNT_WORDS.get(day_count, (str(day_count), str(day_count)))
+    runs = paragraph.runs
+    if not runs:
+        return
 
-    # Title: "THREE (3)" → "{UPPER} ({N})"
-    text = text.replace("THREE (3)", f"{upper_word} ({day_count})")
-    # Body: "three (3)" → "{lower} ({N})"
-    text = text.replace("three (3)", f"{lower_word} ({day_count})")
-    # Reverse order: "3 (three)" → "{N} ({lower})"
-    text = text.replace("3 (three)", f"{day_count} ({lower_word})")
-    return text
+    # Try single-run replacement first
+    for run in runs:
+        run.text = run.text.replace("THREE (3)", f"{upper_word} ({day_count})")
+        run.text = run.text.replace("three (3)", f"{lower_word} ({day_count})")
+        run.text = run.text.replace("3 (three)", f"{day_count} ({lower_word})")
+
+    # Handle split runs: replace individual tokens
+    for run in runs:
+        if run.text == "THREE":
+            run.text = upper_word
+        elif run.text == "(3)":
+            run.text = f"({day_count})"
+        elif run.text == "three":
+            run.text = lower_word
+        # Also handle inline occurrences like "within three" or "the 3"
+        elif "three" in run.text and "three" != lower_word:
+            run.text = run.text.replace("three", lower_word)
+        elif " 3 " in run.text:
+            run.text = run.text.replace(" 3 ", f" {day_count} ")
 
 
-def _build_amounts_table(table, amounts_due: list) -> None:
-    """Populate the amounts due table with multiple rows.
+def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
+    """Replace the {{RENT_DUE_DATE}} / {{AMOUNT_DUE}} paragraph with formatted amount lines.
 
-    The template has a single data row with {{RENT_DUE_DATE}} and {{AMOUNT_DUE}}.
-    We replace the first row's placeholders with the first amount,
-    then clone that row for each additional amount.
+    The branded templates use tab-separated paragraphs (no Word tables).
+    The template has a paragraph like: {{RENT_DUE_DATE}}\t{{AMOUNT_DUE}}
+    We replace it with one line per amount: "date\tamount".
     """
     if not amounts_due:
         return
 
-    # The table has header text in the first paragraphs of each cell,
-    # and placeholder text in the second paragraphs.
-    # Row 0 is the only row. Cell 0 = DUE DATE column, Cell 1 = AMOUNT DUE column.
-    row = table.rows[0]
+    for para in doc.paragraphs:
+        full_text = "".join(run.text for run in para.runs)
+        if "{{RENT_DUE_DATE}}" in full_text and "{{AMOUNT_DUE}}" in full_text:
+            # Build formatted lines
+            lines = []
+            for a in amounts_due:
+                lines.append(f"{a['due_date']}\t{a['amount']}")
+            replacement = "\n".join(lines)
 
-    # Replace placeholders in the first row with first amount
-    for cell in row.cells:
-        for paragraph in cell.paragraphs:
-            if "{{RENT_DUE_DATE}}" in paragraph.text:
-                # Build all due dates as newline-separated text
-                dates_text = "\n".join(a["due_date"] for a in amounts_due)
-                for run in paragraph.runs:
-                    if "{{RENT_DUE_DATE}}" in run.text:
-                        run.text = run.text.replace("{{RENT_DUE_DATE}}", dates_text)
-            if "{{AMOUNT_DUE}}" in paragraph.text:
-                amounts_text = "\n".join(a["amount"] for a in amounts_due)
-                for run in paragraph.runs:
-                    if "{{AMOUNT_DUE}}" in run.text:
-                        run.text = run.text.replace("{{AMOUNT_DUE}}", amounts_text)
+            # Set first run to the full replacement, clear the rest
+            if para.runs:
+                para.runs[0].text = replacement
+                for run in para.runs[1:]:
+                    run.text = ""
+            break
 
 
 @app.post("/generate-notice")
@@ -608,9 +631,13 @@ async def generate_notice(req: GenerateNoticeRequest):
             detail=f"Invalid day_count {req.day_count}. Must be one of: {list(DAY_COUNT_WORDS.keys())}",
         )
 
-    # Select template — for now both use the same commercial template
-    # TODO: create separate residential template when available
-    template_name = "3day_commercial_TEMPLATE.docx"
+    # Select template based on notice_type
+    template_name = NOTICE_TEMPLATES.get(req.notice_type)
+    if not template_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid notice_type '{req.notice_type}'. Must be one of: {list(NOTICE_TEMPLATES.keys())}",
+        )
     template_path = TEMPLATES_DIR / template_name
     if not template_path.exists():
         raise HTTPException(status_code=500, detail=f"Template not found: {template_name}")
@@ -634,13 +661,11 @@ async def generate_notice(req: GenerateNoticeRequest):
     for paragraph in doc.paragraphs:
         full_text = "".join(run.text for run in paragraph.runs)
         if "three" in full_text.lower() or "THREE" in full_text or "3 (three)" in full_text:
-            for run in paragraph.runs:
-                run.text = _replace_day_count_in_text(run.text, req.day_count)
+            _replace_day_count_in_paragraph(paragraph, req.day_count)
 
-    # --- Step 2: Handle the amounts table (Table 0) ---
-    if doc.tables:
-        amounts_data = [{"due_date": a.due_date, "amount": a.amount} for a in req.amounts_due]
-        _build_amounts_table(doc.tables[0], amounts_data)
+    # --- Step 2: Handle the amounts paragraph (tab-separated, no Word tables) ---
+    amounts_data = [{"due_date": a.due_date, "amount": a.amount} for a in req.amounts_due]
+    _fill_amounts_paragraph(doc, amounts_data)
 
     # --- Step 3: Replace standard placeholders ---
     fields = {
@@ -656,26 +681,9 @@ async def generate_notice(req: GenerateNoticeRequest):
         "DATE_SERVED": req.notice_date,
     }
 
-    # Replace the service date blank
-    for paragraph in doc.paragraphs:
-        if "_________________" in paragraph.text:
-            for run in paragraph.runs:
-                if "_________________" in run.text:
-                    run.text = run.text.replace(
-                        "_________________",
-                        req.service_date if req.service_date else "_________________",
-                    )
-
     # Replace {{KEY}} placeholders in paragraphs
     for paragraph in doc.paragraphs:
         _replace_in_paragraph(paragraph, fields)
-
-    # Replace in tables (for DATE_SERVED in Table 1)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    _replace_in_paragraph(paragraph, fields)
 
     # Replace in headers/footers
     for section in doc.sections:
@@ -683,12 +691,6 @@ async def generate_notice(req: GenerateNoticeRequest):
             if header_footer is not None:
                 for paragraph in header_footer.paragraphs:
                     _replace_in_paragraph(paragraph, fields)
-
-    # Also handle payment address paragraph
-    for paragraph in doc.paragraphs:
-        if "tendered to, or possession of the premises delivered to:" in paragraph.text:
-            # The payment address is in the next paragraphs (already handled by LANDLORD_NAME etc.)
-            pass
 
     # --- Step 4: Save to temp file ---
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
