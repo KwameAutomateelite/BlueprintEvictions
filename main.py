@@ -11,8 +11,8 @@ print("STARTUP: importing httpx...", flush=True)
 import httpx
 print("STARTUP: importing python-docx...", flush=True)
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+from docx.shared import Inches, Pt
 print("STARTUP: importing dropbox-sign...", flush=True)
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 print("STARTUP: importing fastapi...", flush=True)
@@ -599,7 +599,8 @@ def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
 
     The branded templates use tab-separated paragraphs (no Word tables).
     The template has a paragraph like: {{RENT_DUE_DATE}}\t{{AMOUNT_DUE}}
-    We replace it with one line per amount: "date\t\tamount".
+    We replace it with one line per amount using a right-aligned tab stop
+    so dollar amounts line up regardless of digit count.
     """
     if not amounts_due:
         return
@@ -607,10 +608,14 @@ def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
     for para in doc.paragraphs:
         full_text = "".join(run.text for run in para.runs)
         if "{{RENT_DUE_DATE}}" in full_text and "{{AMOUNT_DUE}}" in full_text:
-            # Build formatted lines with double-tab for clear spacing
+            # Add a right-aligned tab stop at 6.5 inches for amount column
+            tab_stops = para.paragraph_format.tab_stops
+            tab_stops.add_tab_stop(Inches(6.5), WD_TAB_ALIGNMENT.RIGHT)
+
+            # Build formatted lines — single tab to hit the right-aligned stop
             lines = []
             for a in amounts_due:
-                lines.append(f"{a['due_date']}\t\t{a['amount']}")
+                lines.append(f"{a['due_date']}\t{a['amount']}")
             replacement = "\n".join(lines)
 
             # Set first run to the full replacement, clear the rest
