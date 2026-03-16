@@ -597,7 +597,7 @@ def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
 
     The branded templates use tab-separated paragraphs (no Word tables).
     The template has a paragraph like: {{RENT_DUE_DATE}}\t{{AMOUNT_DUE}}
-    We replace it with one line per amount: "date\tamount".
+    We replace it with one line per amount: "date\t\tamount".
     """
     if not amounts_due:
         return
@@ -605,10 +605,10 @@ def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
     for para in doc.paragraphs:
         full_text = "".join(run.text for run in para.runs)
         if "{{RENT_DUE_DATE}}" in full_text and "{{AMOUNT_DUE}}" in full_text:
-            # Build formatted lines
+            # Build formatted lines with double-tab for clear spacing
             lines = []
             for a in amounts_due:
-                lines.append(f"{a['due_date']}\t{a['amount']}")
+                lines.append(f"{a['due_date']}\t\t{a['amount']}")
             replacement = "\n".join(lines)
 
             # Set first run to the full replacement, clear the rest
@@ -641,6 +641,32 @@ async def generate_notice(req: GenerateNoticeRequest):
     template_path = TEMPLATES_DIR / template_name
     if not template_path.exists():
         raise HTTPException(status_code=500, detail=f"Template not found: {template_name}")
+
+    # --- Sanitize NOT_FOUND values ---
+    BLANK_LINE = "_______________"
+    def sanitize(val: str) -> str:
+        """Replace NOT_FOUND/empty/None values with a blank line for the document."""
+        if not val:
+            return BLANK_LINE
+        s = str(val).strip()
+        if s.upper() in ("NOT_FOUND", "NOT FOUND", "N/A", "NONE", "NULL", ""):
+            return BLANK_LINE
+        return s
+
+    # Sanitize all request fields before use
+    req.tenant_names = sanitize(req.tenant_names)
+    req.property_address = sanitize(req.property_address)
+    req.county = sanitize(req.county)
+    req.total_amount_due = sanitize(req.total_amount_due)
+    req.service_date = sanitize(req.service_date)
+    req.payment_address = sanitize(req.payment_address)
+    req.landlord_name = sanitize(req.landlord_name)
+    req.landlord_phone = sanitize(req.landlord_phone)
+    req.landlord_address = sanitize(req.landlord_address)
+    req.notice_date = sanitize(req.notice_date)
+    for a in req.amounts_due:
+        a.due_date = sanitize(a.due_date)
+        a.amount = sanitize(a.amount)
 
     # Parse address into street and city/state/zip
     addr_parts = req.property_address.rsplit(",", 2)
