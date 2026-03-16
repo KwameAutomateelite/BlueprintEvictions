@@ -87,7 +87,9 @@ class GenerateNoticeRequest(BaseModel):
     notice_type: str  # "residential" or "commercial"
     day_count: int  # 3, 5, 10, 15, 30
     tenant_names: str
-    property_address: str
+    property_address: str = ""
+    property_address_street: str = ""  # Optional: if provided, used directly instead of splitting property_address
+    property_address_city: str = ""    # Optional: if provided, used directly instead of splitting property_address
     county: str
     amounts_due: List[AmountDue]
     total_amount_due: str
@@ -656,6 +658,8 @@ async def generate_notice(req: GenerateNoticeRequest):
     # Sanitize all request fields before use
     req.tenant_names = sanitize(req.tenant_names)
     req.property_address = sanitize(req.property_address)
+    req.property_address_street = sanitize(req.property_address_street) if req.property_address_street else ""
+    req.property_address_city = sanitize(req.property_address_city) if req.property_address_city else ""
     req.county = sanitize(req.county)
     req.total_amount_due = sanitize(req.total_amount_due)
     req.service_date = sanitize(req.service_date)
@@ -669,16 +673,18 @@ async def generate_notice(req: GenerateNoticeRequest):
         a.amount = sanitize(a.amount)
 
     # Parse address into street and city/state/zip
-    addr_parts = req.property_address.rsplit(",", 2)
-    if len(addr_parts) >= 3:
-        street = addr_parts[0].strip()
-        city_state_zip = ",".join(addr_parts[1:]).strip()
-    elif len(addr_parts) == 2:
-        street = addr_parts[0].strip()
-        city_state_zip = addr_parts[1].strip()
+    # Prefer explicit street/city fields if provided; otherwise split property_address
+    if req.property_address_street:
+        street = req.property_address_street
+        city_state_zip = req.property_address_city
     else:
-        street = req.property_address
-        city_state_zip = ""
+        addr_parts = req.property_address.split(",", 1)
+        if len(addr_parts) == 2:
+            street = addr_parts[0].strip()
+            city_state_zip = addr_parts[1].strip()
+        else:
+            street = req.property_address
+            city_state_zip = ""
 
     # Load template
     doc = Document(str(template_path))
