@@ -119,19 +119,47 @@ def fix_commercial_template(filepath):
         to_p = paragraphs[to_idx]
         tenant_p = paragraphs[tenant_idx]
 
-        # Get formatting from existing "To:" run
-        to_run = to_p.runs[0] if to_p.runs else None
-
         # Change "To:" to "To: {{TENANT_NAMES}}"
         if to_p.runs:
             to_p.runs[0].text = 'To: {{TENANT_NAMES}}'
         else:
-            run = to_p.add_run('To: {{TENANT_NAMES}}')
+            to_p.add_run('To: {{TENANT_NAMES}}')
 
         # Remove the separate {{TENANT_NAMES}} paragraph
         remove_paragraph(tenant_p)
+    elif to_idx is None and tenant_idx is None:
+        # Neither exists — insert "To: {{TENANT_NAMES}}" before "Tenants in possession..."
+        tenants_idx = find_paragraph_index(doc, 'Tenants in possession')
+        if tenants_idx is not None:
+            ref_p = paragraphs[tenants_idx]
+            # Get formatting reference from the "Tenants in possession" paragraph
+            ref_indent = ref_p.paragraph_format.left_indent
 
-    # Re-index paragraphs after removal
+            # Insert a new paragraph before the reference paragraph
+            new_p_elem = copy.deepcopy(ref_p._element)
+            # Clear all runs from the copy
+            for r in list(new_p_elem.findall(qn('w:r'))):
+                new_p_elem.remove(r)
+            ref_p._element.addprevious(new_p_elem)
+
+            # Re-index to get the new paragraph object
+            paragraphs = doc.paragraphs
+            new_to_idx = find_paragraph_index(doc, '')  # find our empty para
+            # It should be right before tenants_idx
+            for i, p in enumerate(paragraphs):
+                if p._element is new_p_elem:
+                    new_to_idx = i
+                    break
+            new_to_p = paragraphs[new_to_idx]
+            run = new_to_p.add_run('To: {{TENANT_NAMES}}')
+            run.bold = True
+            if ref_p.runs and ref_p.runs[0].font.size:
+                run.font.size = ref_p.runs[0].font.size
+            if ref_p.runs and ref_p.runs[0].font.name:
+                run.font.name = ref_p.runs[0].font.name
+            new_to_p.paragraph_format.left_indent = ref_indent
+
+    # Re-index paragraphs after changes
     paragraphs = doc.paragraphs
 
     # === TASK 1.2: Fix property address alignment ===
@@ -293,6 +321,30 @@ def fix_residential_template(filepath):
         else:
             to_p.add_run('To: {{TENANT_NAMES}}')
         remove_paragraph(tenant_p)
+    elif to_idx is None and tenant_idx is None:
+        # Neither exists — insert "To: {{TENANT_NAMES}}" before "Tenants in possession..."
+        tenants_idx = find_paragraph_index(doc, 'Tenants in possession')
+        if tenants_idx is not None:
+            ref_p = paragraphs[tenants_idx]
+            ref_indent = ref_p.paragraph_format.left_indent
+
+            new_p_elem = copy.deepcopy(ref_p._element)
+            for r in list(new_p_elem.findall(qn('w:r'))):
+                new_p_elem.remove(r)
+            ref_p._element.addprevious(new_p_elem)
+
+            paragraphs = doc.paragraphs
+            for i, p in enumerate(paragraphs):
+                if p._element is new_p_elem:
+                    new_to_p = p
+                    break
+            run = new_to_p.add_run('To: {{TENANT_NAMES}}')
+            run.bold = True
+            if ref_p.runs and ref_p.runs[0].font.size:
+                run.font.size = ref_p.runs[0].font.size
+            if ref_p.runs and ref_p.runs[0].font.name:
+                run.font.name = ref_p.runs[0].font.name
+            new_to_p.paragraph_format.left_indent = ref_indent
 
     # Re-index
     paragraphs = doc.paragraphs

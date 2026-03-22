@@ -100,6 +100,7 @@ class GenerateNoticeRequest(BaseModel):
     landlord_address: str = ""
     notice_date: str = ""
     case_name: str = ""
+    notice_header: str = ""  # Override for notice header text; defaults based on day_count
     is_section_8: bool = False
     is_san_jose_tpo: bool = False
     is_mountain_view_csfra: bool = False
@@ -595,16 +596,17 @@ def _replace_day_count_in_paragraph(paragraph, day_count: int) -> None:
 
 
 def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
-    """Replace the {{RENT_DUE_DATE}} / {{AMOUNT_DUE}} paragraph with formatted amount lines.
+    """Replace {{RENT_DUE_DATE}} / {{AMOUNT_DUE}} placeholders with actual amounts.
 
-    The branded templates use tab-separated paragraphs (no Word tables).
-    The template has a paragraph like: {{RENT_DUE_DATE}}\t{{AMOUNT_DUE}}
-    We replace it with one line per amount using a right-aligned tab stop
-    so dollar amounts line up regardless of digit count.
+    Handles two template layouts:
+    1. Tab-separated paragraphs: {{RENT_DUE_DATE}}\t{{AMOUNT_DUE}}
+       Uses a right-aligned tab stop so dollar amounts line up.
+    2. Word table cells: separate cells for {{RENT_DUE_DATE}} and {{AMOUNT_DUE}}
     """
     if not amounts_due:
         return
 
+    # --- Layout 1: Tab-separated paragraphs (legacy) ---
     for para in doc.paragraphs:
         full_text = "".join(run.text for run in para.runs)
         if "{{RENT_DUE_DATE}}" in full_text and "{{AMOUNT_DUE}}" in full_text:
@@ -617,13 +619,31 @@ def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
             for a in amounts_due:
                 lines.append(f"{a['due_date']}\t{a['amount']}")
             replacement = "\n".join(lines)
-
-            # Set first run to the full replacement, clear the rest
             if para.runs:
                 para.runs[0].text = replacement
                 for run in para.runs[1:]:
                     run.text = ""
-            break
+            return  # Done — legacy layout found
+
+    # --- Layout 2: Word table cells ---
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                cell_text = cell.text.strip()
+                if "{{RENT_DUE_DATE}}" in cell_text or "{{AMOUNT_DUE}}" in cell_text:
+                    # Found the amounts table — fill the data row(s)
+                    # Build combined date and amount strings (newline-separated for multi-month)
+                    dates_str = "\n".join(a["due_date"] for a in amounts_due)
+                    amounts_str = "\n".join(a["amount"] for a in amounts_due)
+                    # Replace in all cells of this table
+                    for r in table.rows:
+                        for c in r.cells:
+                            for para in c.paragraphs:
+                                _replace_in_paragraph(para, {
+                                    "RENT_DUE_DATE": dates_str,
+                                    "AMOUNT_DUE": amounts_str,
+                                })
+                    return  # Done — table layout found
 
 
 @app.post("/generate-notice")
@@ -694,13 +714,28 @@ async def generate_notice(req: GenerateNoticeRequest):
     # Load template
     doc = Document(str(template_path))
 
-    # --- Step 1: Replace day count in all text ---
+    # --- Step 0: Compute NOTICE_HEADER ---
+    # Default header based on day_count if not provided
+    if req.notice_header:
+        notice_header = req.notice_header
+    else:
+        lower_word, upper_word = DAY_COUNT_WORDS.get(req.day_count, (str(req.day_count), str(req.day_count)))
+        notice_header = f"{upper_word} ({req.day_count}) DAY NOTICE TO PAY OR QUIT"
+
+    # --- Step 1: Replace day count in all text (paragraphs + table cells) ---
     for paragraph in doc.paragraphs:
         full_text = "".join(run.text for run in paragraph.runs)
         if "three" in full_text.lower() or "THREE" in full_text or "3 (three)" in full_text:
             _replace_day_count_in_paragraph(paragraph, req.day_count)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    full_text = "".join(run.text for run in paragraph.runs)
+                    if "three" in full_text.lower() or "THREE" in full_text or "3 (three)" in full_text:
+                        _replace_day_count_in_paragraph(paragraph, req.day_count)
 
-    # --- Step 2: Handle the amounts paragraph (tab-separated, no Word tables) ---
+    # --- Step 2: Handle the amounts (tab-separated paragraphs or Word table) ---
     amounts_data = [{"due_date": a.due_date, "amount": a.amount} for a in req.amounts_due]
     _fill_amounts_paragraph(doc, amounts_data)
 
@@ -716,11 +751,19 @@ async def generate_notice(req: GenerateNoticeRequest):
         "LANDLORD_ADDRESS": req.landlord_address or req.payment_address,
         "LANDLORD_PHONE": req.landlord_phone,
         "DATE_SERVED": req.notice_date,
+        "NOTICE_HEADER": notice_header,
     }
 
     # Replace {{KEY}} placeholders in paragraphs
     for paragraph in doc.paragraphs:
         _replace_in_paragraph(paragraph, fields)
+
+    # Replace {{KEY}} placeholders in table cells
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    _replace_in_paragraph(paragraph, fields)
 
     # Replace in headers/footers
     for section in doc.sections:
