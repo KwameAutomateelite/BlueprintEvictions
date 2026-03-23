@@ -13,6 +13,8 @@ print("STARTUP: importing python-docx...", flush=True)
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.shared import Inches, Pt
+print("STARTUP: importing pypdf...", flush=True)
+from pypdf import PdfReader, PdfWriter
 print("STARTUP: importing dropbox-sign...", flush=True)
 from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 print("STARTUP: importing fastapi...", flush=True)
@@ -41,6 +43,7 @@ AIRTABLE_TABLE_ID = os.environ.get("AIRTABLE_TABLE_ID", "tblZbUGz8OTvFNh9i")
 configuration = Configuration(username=DROPBOX_SIGN_API_KEY)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+ATTACHMENTS_DIR = Path(__file__).parent / "attachments"
 
 TEMPLATE_MAP = {
     "3-Day Pay or Quit": "3-Day Notice - BLUEPRINT - commercial - NEW BRANDING_071125.docx",
@@ -70,6 +73,7 @@ class SendSignatureRequest(BaseModel):
     case_name: str
     fields: dict
     file_url: Optional[str] = None
+    attachments_required: List[str] = []
 
 
 class SendSignatureResponse(BaseModel):
@@ -104,6 +108,7 @@ class GenerateNoticeRequest(BaseModel):
     is_section_8: bool = False
     is_san_jose_tpo: bool = False
     is_mountain_view_csfra: bool = False
+    attachments_required: List[str] = []
 
 
 DAY_COUNT_WORDS = {
@@ -340,6 +345,47 @@ async def update_airtable_status(record_id: str, status: str) -> None:
         logger.info(f"Airtable record {record_id} updated to Status='{status}'")
 
 
+def merge_attachment_pdfs(notice_pdf_path: str, attachment_filenames: List[str]) -> str:
+    """Merge static attachment PDFs onto the end of the notice PDF.
+
+    Args:
+        notice_pdf_path: Path to the generated notice PDF.
+        attachment_filenames: List of PDF filenames in ATTACHMENTS_DIR to append.
+
+    Returns:
+        Path to the merged PDF (new temp file). Original is not modified.
+    """
+    if not attachment_filenames:
+        return notice_pdf_path
+
+    writer = PdfWriter()
+
+    # Add the notice PDF pages
+    notice_reader = PdfReader(notice_pdf_path)
+    for page in notice_reader.pages:
+        writer.add_page(page)
+
+    # Append each attachment PDF in order
+    for filename in attachment_filenames:
+        attachment_path = ATTACHMENTS_DIR / filename
+        if not attachment_path.exists():
+            logger.warning(f"Attachment not found, skipping: {attachment_path}")
+            continue
+        attachment_reader = PdfReader(str(attachment_path))
+        for page in attachment_reader.pages:
+            writer.add_page(page)
+        logger.info(f"Merged attachment: {filename} ({len(attachment_reader.pages)} pages)")
+
+    # Write merged PDF
+    merged_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    merged_tmp.close()
+    writer.write(merged_tmp.name)
+    merged_size = os.path.getsize(merged_tmp.name)
+    logger.info(f"Merged PDF: {merged_tmp.name} size={merged_size} ({len(writer.pages)} total pages)")
+
+    return merged_tmp.name
+
+
 # --- Endpoints ---
 
 
@@ -440,6 +486,27 @@ async def send_signature(req: SendSignatureRequest):
         logger.error(f"Failed to prepare PDF: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to prepare PDF: {str(e)}")
     logger.info(f"DEBUG final file_path={file_path} size={os.path.getsize(file_path)}")
+
+    # Merge attachment PDFs if required
+    original_file_path = file_path
+    if req.attachments_required:
+        logger.info(f"Merging {len(req.attachments_required)} attachments: {req.attachments_required}")
+        # Convert DOCX to PDF first if needed (file_url branch gives PDF, template branch gives DOCX)
+        if file_path.endswith(".pdf"):
+            notice_pdf = file_path
+        else:
+            notice_pdf = convert_docx_to_pdf(file_path)
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
+        file_path = merge_attachment_pdfs(notice_pdf, req.attachments_required)
+        if file_path != notice_pdf:
+            try:
+                os.unlink(notice_pdf)
+            except OSError:
+                pass
+        logger.info(f"Final merged PDF: {file_path} size={os.path.getsize(file_path)}")
 
     try:
         with ApiClient(configuration) as api_client:
@@ -779,14 +846,8 @@ async def generate_notice(req: GenerateNoticeRequest):
     file_size = os.path.getsize(tmp.name)
     logger.info(f"generate-notice: saved {tmp.name} size={file_size}")
 
-    # --- Step 5: Build conditional attachments header ---
-    attachments = []
-    if req.is_section_8 and req.day_count == 30:
-        attachments.extend(["Attachment_1_HUD-5380.pdf", "Attachment_2_HUD-5382.pdf"])
-    if req.is_san_jose_tpo:
-        attachments.append("TPO_Required_Attachment.pdf")
-    if req.is_mountain_view_csfra:
-        attachments.append("Mountain_View_Attachment.pdf")
+    # --- Step 5: Use attachments_required from request (deterministic rules in n8n) ---
+    attachments = list(req.attachments_required) if req.attachments_required else []
 
     # --- Step 6: Return the .docx ---
     safe_case_name = req.case_name.replace('"', '').replace("'", "") if req.case_name else "Notice"

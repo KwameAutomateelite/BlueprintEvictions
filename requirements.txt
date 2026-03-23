@@ -5,3 +5,4 @@ dropbox-sign==1.8.0
 pydantic==2.10.5
 python-multipart==0.0.20
 python-docx==1.1.2
+pypdf==4.1.0
