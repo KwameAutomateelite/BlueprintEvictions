@@ -662,6 +662,55 @@ def _replace_day_count_in_paragraph(paragraph, day_count: int) -> None:
             run.text = run.text.replace(" 3 ", f" {day_count} ")
 
 
+def _fill_cell_with_values(cell, values: list, template_paragraph) -> None:
+    """Fill a table cell with multiple values, one paragraph per value.
+
+    Preserves paragraph alignment and run font formatting from the template paragraph.
+    """
+    from copy import deepcopy
+    from docx.oxml.ns import qn
+
+    # Get formatting from the template paragraph
+    template_alignment = template_paragraph.paragraph_format.alignment
+    template_run = template_paragraph.runs[0] if template_paragraph.runs else None
+
+    # Set the first value in the existing paragraph (preserves original formatting)
+    if template_paragraph.runs:
+        template_paragraph.runs[0].text = values[0]
+        for run in template_paragraph.runs[1:]:
+            run.text = ""
+    else:
+        template_paragraph.text = values[0]
+
+    # Add additional paragraphs for remaining values, copying formatting
+    for val in values[1:]:
+        new_para = deepcopy(template_paragraph._element)
+        # Clear text in the cloned paragraph, then set new value
+        for r in new_para.findall(qn("w:r")):
+            new_para.remove(r)
+        # Create a new run with the value
+        new_run_elem = deepcopy(template_run._element) if template_run else None
+        if new_run_elem is not None:
+            # Clear existing text nodes and set new text
+            for t in new_run_elem.findall(qn("w:t")):
+                new_run_elem.remove(t)
+            t_elem = new_run_elem.makeelement(qn("w:t"), {})
+            t_elem.text = val
+            # Preserve spaces
+            t_elem.set(qn("xml:space"), "preserve")
+            new_run_elem.append(t_elem)
+            new_para.append(new_run_elem)
+        else:
+            r_elem = new_para.makeelement(qn("w:r"), {})
+            t_elem = r_elem.makeelement(qn("w:t"), {})
+            t_elem.text = val
+            t_elem.set(qn("xml:space"), "preserve")
+            r_elem.append(t_elem)
+            new_para.append(r_elem)
+        # Insert the new paragraph after the current last paragraph in the cell
+        cell._element.append(new_para)
+
+
 def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
     """Replace {{RENT_DUE_DATE}} / {{AMOUNT_DUE}} placeholders with actual amounts.
 
@@ -669,6 +718,7 @@ def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
     1. Tab-separated paragraphs: {{RENT_DUE_DATE}}\t{{AMOUNT_DUE}}
        Uses a right-aligned tab stop so dollar amounts line up.
     2. Word table cells: separate cells for {{RENT_DUE_DATE}} and {{AMOUNT_DUE}}
+       Creates one paragraph per amount row, preserving alignment and font formatting.
     """
     if not amounts_due:
         return
@@ -698,18 +748,18 @@ def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
             for cell in row.cells:
                 cell_text = cell.text.strip()
                 if "{{RENT_DUE_DATE}}" in cell_text or "{{AMOUNT_DUE}}" in cell_text:
-                    # Found the amounts table — fill the data row(s)
-                    # Build combined date and amount strings (newline-separated for multi-month)
-                    dates_str = "\n".join(a["due_date"] for a in amounts_due)
-                    amounts_str = "\n".join(a["amount"] for a in amounts_due)
-                    # Replace in all cells of this table
+                    # Found the amounts table — fill cells with proper paragraphs
+                    dates = [a["due_date"] for a in amounts_due]
+                    amounts = [a["amount"] for a in amounts_due]
+
                     for r in table.rows:
                         for c in r.cells:
                             for para in c.paragraphs:
-                                _replace_in_paragraph(para, {
-                                    "RENT_DUE_DATE": dates_str,
-                                    "AMOUNT_DUE": amounts_str,
-                                })
+                                full = "".join(run.text for run in para.runs)
+                                if "{{RENT_DUE_DATE}}" in full:
+                                    _fill_cell_with_values(c, dates, para)
+                                elif "{{AMOUNT_DUE}}" in full:
+                                    _fill_cell_with_values(c, amounts, para)
                     return  # Done — table layout found
 
 
@@ -817,7 +867,7 @@ async def generate_notice(req: GenerateNoticeRequest):
         "LANDLORD_COMPANY": "",  # Not in the request schema, leave blank
         "LANDLORD_ADDRESS": req.landlord_address or req.payment_address,
         "LANDLORD_PHONE": req.landlord_phone,
-        "DATE_SERVED": req.notice_date,
+        "DATE_SERVED": req.service_date,
         "NOTICE_HEADER": notice_header,
     }
 
