@@ -102,6 +102,9 @@ class GenerateNoticeRequest(BaseModel):
     landlord_name: str
     landlord_phone: str = ""
     landlord_address: str = ""
+    landlord_city: str = ""
+    landlord_state: str = ""
+    landlord_zip: str = ""
     notice_date: str = ""
     case_name: str = ""
     notice_header: str = ""  # Override for notice header text; defaults based on day_count
@@ -763,6 +766,177 @@ def _fill_amounts_paragraph(doc, amounts_due: list) -> None:
                     return  # Done — table layout found
 
 
+def _get_paragraph_left_indent_twips(paragraph) -> int:
+    """Return the effective left indent (in twips/dxa) of a paragraph, or 0 if none."""
+    from docx.oxml.ns import qn
+
+    pPr = paragraph._p.find(qn("w:pPr"))
+    if pPr is None:
+        return 0
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        return 0
+    left = ind.get(qn("w:left")) or ind.get(qn("w:start"))
+    try:
+        return int(left) if left is not None else 0
+    except ValueError:
+        return 0
+
+
+def _insert_borderless_table(
+    doc,
+    insert_before_element,
+    rows_data: list,
+    ref_paragraph,
+    left_indent_twips: int = 0,
+) -> None:
+    """Create a 1-column borderless table and insert it before the given XML element.
+
+    rows_data: list of strings, one per row.
+    ref_paragraph: a paragraph whose font formatting is copied to every cell.
+    left_indent_twips: left indent for the table (in twips/dxa), matched to body paragraphs.
+    """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    table = doc.add_table(rows=len(rows_data), cols=1)
+    tbl = table._tbl
+
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement("w:tblPr")
+        tbl.insert(0, tblPr)
+    for old in tblPr.findall(qn("w:tblBorders")):
+        tblPr.remove(old)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "none")
+        el.set(qn("w:sz"), "0")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "auto")
+        borders.append(el)
+    tblPr.append(borders)
+
+    for old in tblPr.findall(qn("w:tblInd")):
+        tblPr.remove(old)
+    tblInd = OxmlElement("w:tblInd")
+    tblInd.set(qn("w:w"), str(int(left_indent_twips)))
+    tblInd.set(qn("w:type"), "dxa")
+    tblPr.append(tblInd)
+
+    for old in tblPr.findall(qn("w:tblCellMar")):
+        tblPr.remove(old)
+    tblCellMar = OxmlElement("w:tblCellMar")
+    for side in ("top", "left", "bottom", "right"):
+        m = OxmlElement(f"w:{side}")
+        m.set(qn("w:w"), "0")
+        m.set(qn("w:type"), "dxa")
+        tblCellMar.append(m)
+    tblPr.append(tblCellMar)
+
+    tblW = OxmlElement("w:tblW")
+    tblW.set(qn("w:w"), "0")
+    tblW.set(qn("w:type"), "auto")
+    tblPr.append(tblW)
+
+    ref_run = ref_paragraph.runs[0] if ref_paragraph.runs else None
+    for i, text in enumerate(rows_data):
+        cell = table.cell(i, 0)
+        tcPr = cell._element.get_or_add_tcPr()
+        for shd in tcPr.findall(qn("w:shd")):
+            tcPr.remove(shd)
+        tcMar = OxmlElement("w:tcMar")
+        for side in ("top", "left", "bottom", "right"):
+            m = OxmlElement(f"w:{side}")
+            m.set(qn("w:w"), "0")
+            m.set(qn("w:type"), "dxa")
+            tcMar.append(m)
+        tcPr.append(tcMar)
+
+        para = cell.paragraphs[0]
+        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = para.add_run(text)
+        if ref_run:
+            run.font.size = ref_run.font.size
+            run.font.name = ref_run.font.name
+            run.font.bold = ref_run.font.bold
+            run.font.italic = ref_run.font.italic
+
+    parent = insert_before_element.getparent()
+    parent.insert(parent.index(insert_before_element), tbl)
+
+
+def _replace_owner_block_with_table(doc, owner_name: str, addr_line1: str, city_state_zip: str) -> None:
+    """Replace the LANDLORD_NAME / COMPANY / ADDRESS paragraphs with a 3-row borderless table.
+
+    The table's left indent is taken from the preceding body paragraph (e.g. "Payment of the
+    above total amount due...") so the table aligns with surrounding body text instead of
+    hanging off the page margin.
+    """
+    body = doc.element.body
+    paras = list(doc.paragraphs)
+    for i, para in enumerate(paras):
+        full = "".join(r.text for r in para.runs)
+        if "{{LANDLORD_NAME}}" not in full:
+            continue
+        to_remove = [para._element]
+        if i + 1 < len(paras):
+            nxt = "".join(r.text for r in paras[i + 1].runs)
+            if "{{LANDLORD_COMPANY}}" in nxt or not nxt.strip():
+                to_remove.append(paras[i + 1]._element)
+        if i + 2 < len(paras):
+            nxt2 = "".join(r.text for r in paras[i + 2].runs)
+            if "{{LANDLORD_ADDRESS}}" in nxt2:
+                to_remove.append(paras[i + 2]._element)
+
+        indent = _get_paragraph_left_indent_twips(paras[i - 1]) if i > 0 else 0
+
+        rows = [owner_name, addr_line1, city_state_zip]
+        _insert_borderless_table(doc, to_remove[0], rows, para, left_indent_twips=indent)
+        for el in to_remove:
+            body.remove(el)
+        return
+
+
+def _replace_housing_provider_block_with_table(
+    doc, addr_line1: str, city_state_zip: str, phone: str
+) -> None:
+    """Replace the Housing Provider's / Landlord's Address block with a 4-row borderless table.
+
+    The label paragraph in the template carries its own left indent (e.g. w:left="3248"),
+    which is propagated to the table so all four rows stay aligned with the original label
+    position instead of snapping to the page margin.
+    """
+    body = doc.element.body
+    paras = list(doc.paragraphs)
+    for i, para in enumerate(paras):
+        text = para.text.strip()
+        if "Housing Provider" not in text and "Landlord's Address" not in text:
+            continue
+        label = text
+        to_remove = [para._element]
+        for j in range(i + 1, min(i + 4, len(paras))):
+            nxt = "".join(r.text for r in paras[j].runs).strip()
+            if (
+                "{{LANDLORD_ADDRESS}}" in nxt
+                or "{{LANDLORD_PHONE}}" in nxt
+                or "Phone:" in nxt
+                or not nxt
+            ):
+                to_remove.append(paras[j]._element)
+            else:
+                break
+
+        indent = _get_paragraph_left_indent_twips(para)
+
+        rows = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
+        _insert_borderless_table(doc, to_remove[0], rows, para, left_indent_twips=indent)
+        for el in to_remove:
+            body.remove(el)
+        return
+
+
 @app.post("/generate-notice")
 async def generate_notice(req: GenerateNoticeRequest):
     """Generate a filled .docx eviction notice from template and return it."""
@@ -809,6 +983,9 @@ async def generate_notice(req: GenerateNoticeRequest):
     req.landlord_name = sanitize(req.landlord_name)
     req.landlord_phone = sanitize(req.landlord_phone)
     req.landlord_address = sanitize(req.landlord_address)
+    req.landlord_city = req.landlord_city.strip() if req.landlord_city else ""
+    req.landlord_state = req.landlord_state.strip() if req.landlord_state else ""
+    req.landlord_zip = req.landlord_zip.strip() if req.landlord_zip else ""
     req.notice_date = sanitize(req.notice_date)
     for a in req.amounts_due:
         a.due_date = sanitize(a.due_date)
@@ -827,6 +1004,35 @@ async def generate_notice(req: GenerateNoticeRequest):
         else:
             street = req.property_address
             city_state_zip = ""
+
+    # Build landlord address block.
+    # Prefer explicit city/state/zip fields (formatted as "City, ST 12345");
+    # fall back to parsing a combined blob when only landlord_address is provided.
+    landlord_full = req.landlord_address or req.payment_address
+    if req.landlord_city or req.landlord_state or req.landlord_zip:
+        landlord_addr_line1 = landlord_full.strip()
+        city = req.landlord_city
+        state = req.landlord_state
+        zipc = req.landlord_zip
+        if city and state:
+            csz = f"{city}, {state}"
+        elif city:
+            csz = city
+        elif state:
+            csz = state
+        else:
+            csz = ""
+        if zipc:
+            csz = f"{csz} {zipc}".strip()
+        landlord_city_state_zip = csz
+    else:
+        ll_parts = landlord_full.split(",", 1)
+        if len(ll_parts) == 2:
+            landlord_addr_line1 = ll_parts[0].strip()
+            landlord_city_state_zip = ll_parts[1].strip()
+        else:
+            landlord_addr_line1 = landlord_full
+            landlord_city_state_zip = ""
 
     # Load template
     doc = Document(str(template_path))
@@ -856,7 +1062,18 @@ async def generate_notice(req: GenerateNoticeRequest):
     amounts_data = [{"due_date": a.due_date, "amount": a.amount} for a in req.amounts_due]
     _fill_amounts_paragraph(doc, amounts_data)
 
+    # --- Step 2b: Replace owner/address blocks with borderless tables ---
+    _replace_owner_block_with_table(
+        doc, req.landlord_name, landlord_addr_line1, landlord_city_state_zip
+    )
+    _replace_housing_provider_block_with_table(
+        doc, landlord_addr_line1, landlord_city_state_zip, req.landlord_phone
+    )
+
     # --- Step 3: Replace standard placeholders ---
+    # LANDLORD_NAME, LANDLORD_COMPANY, LANDLORD_ADDRESS, and LANDLORD_PHONE are
+    # now handled by the table blocks above, but kept here as fallback in case
+    # additional instances exist elsewhere in the template.
     fields = {
         "TENANT_NAMES": req.tenant_names,
         "PROPERTY_ADDRESS_STREET": street,
@@ -864,8 +1081,8 @@ async def generate_notice(req: GenerateNoticeRequest):
         "COUNTY": req.county,
         "TOTAL_AMOUNT_DUE": req.total_amount_due,
         "LANDLORD_NAME": req.landlord_name,
-        "LANDLORD_COMPANY": "",  # Not in the request schema, leave blank
-        "LANDLORD_ADDRESS": req.landlord_address or req.payment_address,
+        "LANDLORD_COMPANY": "",
+        "LANDLORD_ADDRESS": landlord_full,
         "LANDLORD_PHONE": req.landlord_phone,
         "DATE_SERVED": req.service_date,
         "NOTICE_HEADER": notice_header,
