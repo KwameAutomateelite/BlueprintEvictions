@@ -919,11 +919,293 @@ def _get_paragraph_left_indent_twips(paragraph) -> int:
         return 0
 
 
+# Landlord-block indent: matches the template's signature-line / housing-provider
+# block position so both the page-1 owner block and the page-3 housing-provider
+# block visually sit "closer to the signature line" (per AM's 3 PM call) instead
+# of at body-left.
+LANDLORD_BLOCK_LEFT_TWIPS = 3248
+
+# When AMOUNTS_DUE has at least this many rows, force a hard page break before
+# the California notices heading. Below that threshold the soft compaction
+# logic in _compact_empty_paragraphs_before_heading already keeps the doc to
+# 2 pages without extra whitespace on page 1.
+FORCE_PAGE_BREAK_ROW_THRESHOLD = 6
+
+
+def _ensure_pPr(paragraph):
+    """Return the paragraph's <w:pPr>, creating it (as the first child) if absent."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    pPr = paragraph._p.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        paragraph._p.insert(0, pPr)
+    return pPr
+
+
+def _set_paragraph_spacing_explicit(paragraph, before=None, after=None, line=None) -> None:
+    """Force explicit w:spacing values. Pass None to leave a value alone."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    pPr = _ensure_pPr(paragraph)
+    sp = pPr.find(qn("w:spacing"))
+    if sp is None:
+        sp = OxmlElement("w:spacing")
+        pPr.append(sp)
+    if before is not None:
+        sp.set(qn("w:before"), str(before))
+    if after is not None:
+        sp.set(qn("w:after"), str(after))
+    if line is not None:
+        sp.set(qn("w:line"), str(line))
+
+
+def _set_paragraph_indent(paragraph, left=None, right=None, first_line=None) -> None:
+    """Force explicit w:ind values."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    pPr = _ensure_pPr(paragraph)
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        ind = OxmlElement("w:ind")
+        pPr.append(ind)
+    if left is not None:
+        ind.set(qn("w:left"), str(left))
+    if right is not None:
+        ind.set(qn("w:right"), str(right))
+    if first_line is not None:
+        ind.set(qn("w:firstLine"), str(first_line))
+
+
+def _set_paragraph_alignment(paragraph, value: str) -> None:
+    """Force w:jc to the given value ('left', 'center', 'right', 'both')."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    pPr = _ensure_pPr(paragraph)
+    jc = pPr.find(qn("w:jc"))
+    if jc is None:
+        jc = OxmlElement("w:jc")
+        pPr.append(jc)
+    jc.set(qn("w:val"), value)
+
+
+def _force_left_align_doc(doc) -> None:
+    """Force every body and table-cell paragraph to w:jc=left.
+
+    Per AM's call: 'everything left-justified, nothing centered' for body text.
+    The Blueprint logo lives in section headers (not iterated here) and the
+    rent table itself stays centered on the page (table-level w:jc); only the
+    text inside paragraphs is normalized.
+    """
+
+    for paragraph in doc.paragraphs:
+        _set_paragraph_alignment(paragraph, "left")
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    _set_paragraph_alignment(paragraph, "left")
+
+
+_ALL_OTHER_OCCUPANTS_RE = re.compile(
+    r"\b(?:and\s+)?all\s+other\s+occupants\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_all_other_occupants(text: str) -> str:
+    """Force 'and All Other Occupants' (Title Case A/O/O) regardless of input case."""
+    if not text:
+        return text
+
+    def _fix(match: "re.Match[str]") -> str:
+        original = match.group(0)
+        prefix = "and " if original.lower().startswith("and ") else ""
+        return f"{prefix}All Other Occupants"
+
+    return _ALL_OTHER_OCCUPANTS_RE.sub(_fix, text)
+
+
+def _enforce_all_other_occupants_in_doc(doc) -> None:
+    """Defense-in-depth: rewrite any 'all other occupants' run text to title case.
+
+    Belt-and-suspenders against an upstream LLM that emits the wrong casing.
+    Run-level rewrite (not paragraph-level) so we don't disturb other formatting.
+    """
+    def _fix_paragraph(paragraph) -> None:
+        for run in paragraph.runs:
+            new_text = _normalize_all_other_occupants(run.text)
+            if new_text != run.text:
+                run.text = new_text
+
+    for paragraph in doc.paragraphs:
+        _fix_paragraph(paragraph)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    _fix_paragraph(paragraph)
+
+
+def _fix_tenant_address_block(doc) -> None:
+    """Group street/city/COUNTY OF as a single visual unit on page 1.
+
+    Template ships with three separate paragraphs for the property address
+    (PROPERTY_ADDRESS_STREET, PROPERTY_ADDRESS_CITY, COUNTY OF {{COUNTY}}),
+    plus an empty spacer paragraph between the city line and COUNTY OF, and
+    a different left-indent on the COUNTY line (1085 vs 355 for the other
+    two). After placeholder substitution we:
+
+      1. add visible spacing AFTER the 'situated at:' line (paragraph break
+         before the street),
+      2. zero out before/after spacing on street and city lines so they
+         render as one tight block,
+      3. drop the empty spacer between city and COUNTY OF,
+      4. normalize COUNTY OF to the same indent (355 dxa) as street/city
+         and add visible spacing AFTER it (paragraph break before the
+         '[hereinafter called the "Premises"]' line).
+    """
+    body = doc.element.body
+    paras = list(doc.paragraphs)
+
+    situated_idx = None
+    county_idx = None
+    for i, p in enumerate(paras):
+        text = p.text
+        if situated_idx is None and "situated" in text and "at:" in text:
+            situated_idx = i
+        elif p.text.strip().upper().startswith("COUNTY OF"):
+            county_idx = i
+            break
+
+    if situated_idx is None or county_idx is None:
+        logger.info("tenant-address-fix: skipping (could not locate landmarks)")
+        return
+
+    _set_paragraph_spacing_explicit(paras[situated_idx], after=240)
+    _set_paragraph_spacing_explicit(paras[county_idx], before=0, after=240)
+    _set_paragraph_indent(paras[county_idx], left=355)
+    _set_paragraph_alignment(paras[county_idx], "left")
+
+    for j in range(situated_idx + 1, county_idx):
+        text = paras[j].text.strip()
+        if not text:
+            body.remove(paras[j]._element)
+        else:
+            _set_paragraph_spacing_explicit(paras[j], before=0, after=0)
+            _set_paragraph_indent(paras[j], left=355)
+            _set_paragraph_alignment(paras[j], "left")
+
+
+def _force_amounts_table_cells_left(doc) -> None:
+    """Override every cell paragraph's alignment in the rent (DUE DATE / AMOUNT DUE)
+    table to w:jc=left.
+
+    The template ships with w:jc=center on every cell paragraph in this table —
+    headers and data — and `_fill_cell_with_values` clones that pPr when adding
+    rows, so center alignment leaks into every new row. AM wants both columns
+    to read top-to-bottom left-aligned.
+    """
+    for table in doc.tables:
+        if len(table.columns) != 2:
+            continue
+        first_row_text = " ".join(c.text for c in table.rows[0].cells).upper()
+        if "DUE DATE" not in first_row_text or "AMOUNT DUE" not in first_row_text:
+            continue
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    _set_paragraph_alignment(paragraph, "left")
+        return
+
+
+def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
+    """Move 'TOTAL AMOUNT DUE: $X' into the rent table as a final 2-cell row.
+
+    Result: the dollar value occupies the same column as the AMOUNT DUE data
+    above it (column-aligned, like a spreadsheet total row). The 'TOTAL AMOUNT
+    DUE:' label sits in the left cell, right-justified within that cell so the
+    label nudges toward the divider instead of floating at body-left.
+
+    Returns True if the table-row swap happened, False if the rent table or
+    the standalone TOTAL paragraph couldn't be located.
+    """
+    from docx.oxml.ns import qn
+
+    target_table = None
+    for table in doc.tables:
+        if len(table.columns) != 2 or not table.rows:
+            continue
+        first_row_text = " ".join(c.text for c in table.rows[0].cells).upper()
+        if "DUE DATE" in first_row_text and "AMOUNT DUE" in first_row_text:
+            target_table = table
+            break
+
+    if target_table is None:
+        return False
+
+    new_row = target_table.add_row()
+    label_cell, value_cell = new_row.cells[0], new_row.cells[1]
+
+    label_para = label_cell.paragraphs[0]
+    for r in list(label_para.runs):
+        r.text = ""
+    run = label_para.add_run("TOTAL AMOUNT DUE:")
+    run.bold = True
+    run.font.size = Pt(11.5)
+    label_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+    value_para = value_cell.paragraphs[0]
+    for r in list(value_para.runs):
+        r.text = ""
+    vrun = value_para.add_run(total_amount_due or "")
+    vrun.bold = True
+    vrun.font.size = Pt(11.5)
+    value_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    body = doc.element.body
+    for para in list(doc.paragraphs):
+        text = para.text.strip()
+        if not text.upper().startswith("TOTAL AMOUNT DUE"):
+            continue
+        body.remove(para._element)
+        return True
+    return True
+
+
+def _force_page_break_before(doc, heading_substring: str) -> bool:
+    """Set <w:pageBreakBefore/> on the first body paragraph matching the heading.
+
+    Used to guarantee 'NOTICES FROM THE STATE OF CALIFORNIA' starts on page 2
+    regardless of how many AMOUNTS_DUE rows are rendered above. Without the
+    forced break, 12-row notices push California (and everything below it)
+    to page 3 — AM's 'three pages of a notice' failure mode.
+    """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    for para in doc.paragraphs:
+        if heading_substring not in para.text:
+            continue
+        pPr = _ensure_pPr(para)
+        pbb = pPr.find(qn("w:pageBreakBefore"))
+        if pbb is None:
+            pbb = OxmlElement("w:pageBreakBefore")
+            pPr.append(pbb)
+        return True
+    return False
+
+
 def _insert_paragraphs_before(
     insert_before_element,
     lines: list,
     ref_paragraph,
     zero_spacing: bool = False,
+    left_indent: Optional[int] = None,
 ) -> None:
     """Insert N plain paragraphs (one per string in `lines`) before the given XML element.
 
@@ -933,10 +1215,16 @@ def _insert_paragraphs_before(
     same formatting as the tenant property-address paragraphs that the template
     already aligns correctly.
 
-    When `zero_spacing=True`, the cloned pPr has its w:spacing element stripped so
-    the inserted paragraphs don't inherit the ref's before/after spacing. Stacking
-    3-4 cloned paragraphs with full body spacing (e.g. 221 twips before) otherwise
-    pushes later blocks to a new page.
+    When `zero_spacing=True`, the cloned pPr has its w:spacing replaced with an
+    explicit before=0/after=0 spacing element so neither the ref's nor the
+    BodyText style's default spacing leaks through. Without this, AM saw
+    "two blank lines" between 'delivered to:' and the landlord name even with
+    the ref's spacing stripped.
+
+    When `left_indent` is provided (twips/dxa), the cloned pPr's w:ind w:left is
+    overridden so the inserted paragraphs sit at a specific indent regardless of
+    the ref paragraph's own indent. Used to push landlord blocks to the
+    signature-line indent instead of body-left.
     """
     from copy import deepcopy
     from docx.oxml import OxmlElement
@@ -957,6 +1245,18 @@ def _insert_paragraphs_before(
                 sp = cloned_pPr.find(qn("w:spacing"))
                 if sp is not None:
                     cloned_pPr.remove(sp)
+                explicit_sp = OxmlElement("w:spacing")
+                explicit_sp.set(qn("w:before"), "0")
+                explicit_sp.set(qn("w:after"), "0")
+                cloned_pPr.append(explicit_sp)
+            if left_indent is not None:
+                ind = cloned_pPr.find(qn("w:ind"))
+                if ind is None:
+                    ind = OxmlElement("w:ind")
+                    cloned_pPr.append(ind)
+                ind.set(qn("w:left"), str(left_indent))
+                if ind.get(qn("w:firstLine")):
+                    ind.set(qn("w:firstLine"), "0")
             p.append(cloned_pPr)
         r = OxmlElement("w:r")
         if ref_rPr is not None:
@@ -986,11 +1286,15 @@ def _replace_owner_block_with_paragraphs(
     doc, owner_name: str, addr_line1: str, city_state_zip: str
 ) -> None:
     """Replace the LANDLORD_NAME / COMPANY / ADDRESS template paragraphs with 3 plain
-    paragraphs (name / street / city-state-zip).
+    paragraphs (name / street / city-state-zip), pushed right to the signature-line
+    indent (LANDLORD_BLOCK_LEFT_TWIPS).
 
-    Each new paragraph inherits w:pPr from the preceding body paragraph
-    ("Payment of the above..." — w:left=393, w:right=1504), matching the approach
-    used for the tenant property address that renders correctly.
+    Per AM's call: this block must be left-justified TEXT (not centered) but
+    indented to the right toward the signature-line position. We clone w:pPr
+    from "Payment of the above..." for run/paragraph styling, then override
+    w:ind w:left and force explicit zero before/after spacing so the block
+    sits as one tight unit directly under "delivered to:" with only one blank
+    line between them.
     """
     body = doc.element.body
     paras = list(doc.paragraphs)
@@ -1011,7 +1315,13 @@ def _replace_owner_block_with_paragraphs(
         ref_para = _find_body_ref_paragraph(doc) or (paras[i - 1] if i > 0 else para)
 
         lines = [owner_name, addr_line1, city_state_zip]
-        _insert_paragraphs_before(to_remove[0], lines, ref_para, zero_spacing=True)
+        _insert_paragraphs_before(
+            to_remove[0],
+            lines,
+            ref_para,
+            zero_spacing=True,
+            left_indent=LANDLORD_BLOCK_LEFT_TWIPS,
+        )
         for el in to_remove:
             body.remove(el)
         return
@@ -1056,12 +1366,12 @@ def _replace_housing_provider_block_with_paragraphs(
     doc, addr_line1: str, city_state_zip: str, phone: str
 ) -> None:
     """Replace the Housing Provider's / Landlord's Address block with 4 plain paragraphs
-    (label / street / city-state-zip / phone).
+    (label / street / city-state-zip / phone), pushed right to the signature-line
+    indent (LANDLORD_BLOCK_LEFT_TWIPS).
 
-    Clones w:pPr from the "Payment of the above..." body paragraph (w:left=393),
-    same reference used by the owner block on page 1, so all four rows left-align
-    to the body edge. w:spacing is stripped so 4 stacked paragraphs don't inherit
-    the ref's 221-twip before-spacing that would push this block to its own page.
+    Mirrors the page-1 owner block placement so both landlord blocks sit at the
+    same indent (close to the signature line). Spacing is forced to explicit
+    zero before/after so the four rows render as one tight unit.
     """
     body = doc.element.body
     paras = list(doc.paragraphs)
@@ -1085,7 +1395,13 @@ def _replace_housing_provider_block_with_paragraphs(
 
         ref_para = _find_body_ref_paragraph(doc) or para
         lines = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
-        _insert_paragraphs_before(to_remove[0], lines, ref_para, zero_spacing=True)
+        _insert_paragraphs_before(
+            to_remove[0],
+            lines,
+            ref_para,
+            zero_spacing=True,
+            left_indent=LANDLORD_BLOCK_LEFT_TWIPS,
+        )
         for el in to_remove:
             body.remove(el)
         return
@@ -1127,6 +1443,10 @@ async def generate_notice(req: GenerateNoticeRequest):
 
     # Sanitize all request fields before use
     req.tenant_names = sanitize(req.tenant_names)
+    # Defense-in-depth against upstream LLM casing drift: enforce
+    # "and All Other Occupants" (Title Case) regardless of how the caller
+    # punctuated/cased the suffix.
+    req.tenant_names = _normalize_all_other_occupants(req.tenant_names)
     req.property_address = sanitize(req.property_address)
     req.property_address_street = sanitize(req.property_address_street) if req.property_address_street else ""
     req.property_address_city = sanitize(req.property_address_city) if req.property_address_city else ""
@@ -1234,10 +1554,21 @@ async def generate_notice(req: GenerateNoticeRequest):
     if removed:
         logger.info(f"generate-notice: stripped {removed} empty para(s) before California heading")
 
+    # --- Step 2d: Drop the standalone TOTAL_AMOUNT_DUE paragraph (Heading1).
+    # It will be re-rendered as a row inside the rent table after global
+    # alignment normalization, so the LEFT/RIGHT cell alignments stick.
+    body = doc.element.body
+    for para in list(doc.paragraphs):
+        text = para.text.strip().upper()
+        if text.startswith("TOTAL AMOUNT DUE"):
+            body.remove(para._element)
+            break
+
     # --- Step 3: Replace standard placeholders ---
     # LANDLORD_NAME, LANDLORD_COMPANY, LANDLORD_ADDRESS, and LANDLORD_PHONE are
     # now handled by the table blocks above, but kept here as fallback in case
-    # additional instances exist elsewhere in the template.
+    # additional instances exist elsewhere in the template. TOTAL_AMOUNT_DUE
+    # is also kept as a no-op fallback for the standalone-paragraph layout.
     fields = {
         "TENANT_NAMES": req.tenant_names,
         "PROPERTY_ADDRESS_STREET": street,
@@ -1273,6 +1604,46 @@ async def generate_notice(req: GenerateNoticeRequest):
             if header_footer is not None:
                 for paragraph in header_footer.paragraphs:
                     _replace_in_paragraph(paragraph, fields)
+
+    # --- Step 3b: Tenant-address structural fix (group street/city/COUNTY) ---
+    # Run after placeholder substitution so we operate on the rendered text
+    # ("123 Tenant Addy" / "Santa Cruz, CA 98598" / "COUNTY OF Santa Cruz County")
+    # and can detect landmark paragraphs by content.
+    _fix_tenant_address_block(doc)
+
+    # --- Step 3c: Force left-justify on rent-table cell paragraphs ---
+    # Overrides the template's hardcoded w:jc=center on every cell paragraph
+    # (headers + data + the new TOTAL row).
+    _force_amounts_table_cells_left(doc)
+
+    # --- Step 3d: Defense-in-depth on "All Other Occupants" casing ---
+    # In addition to normalizing req.tenant_names before substitution, also
+    # rewrite any post-substitution run text — handles the unlikely case where
+    # the LLM injected the phrase elsewhere or the upstream payload bypassed
+    # the normalize call.
+    _enforce_all_other_occupants_in_doc(doc)
+
+    # --- Step 3e: Force global left alignment on all body + cell paragraphs ---
+    # AM: "Everything left-justified. NOTHING centered." Logo header lives in
+    # section headers and isn't iterated.
+    _force_left_align_doc(doc)
+
+    # --- Step 3e2: Add the TOTAL AMOUNT DUE row to the rent table ---
+    # Run AFTER _force_left_align_doc so the row's per-cell alignments
+    # (label = RIGHT, value = LEFT) survive the global pass.
+    moved_total = _add_total_row_to_amounts_table(doc, req.total_amount_due)
+    logger.info(f"generate-notice: total-row inlined into table = {moved_total}")
+
+    # --- Step 3f: Force California heading onto page 2 for high-row notices ---
+    # Below the threshold, the soft compaction already keeps the doc to 2
+    # pages without leaving page 1 visibly under-filled. Above it (12-month
+    # notices), we force the break so AM gets predictable 2-page output.
+    if len(req.amounts_due) >= FORCE_PAGE_BREAK_ROW_THRESHOLD:
+        broke = _force_page_break_before(doc, "NOTICES FROM THE STATE OF CALIFORNIA")
+        logger.info(
+            f"generate-notice: forced page-break-before California for "
+            f"{len(req.amounts_due)}-row notice = {broke}"
+        )
 
     # --- Step 4: Save to temp file ---
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
