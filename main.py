@@ -174,6 +174,58 @@ def _strip_city_state_zip_trailer(street_blob: str) -> str:
     return s
 
 
+def _parse_landlord_address(full: str) -> tuple:
+    """Split a landlord-address blob into (street_line1, 'City, CA ZIP').
+
+    Handles the smashed-blob case Airtable leaks (e.g. 'Santa CruzCA12345' with no
+    delimiters) so the owner block and housing-provider block render two clean rows
+    instead of a single run of mashed-together text.
+
+    Order of attempts:
+      1. KNOWN_CITIES anchored match (handles 'Santa CruzCA12345' with no separators)
+      2. Generic '<stuff> CA <ZIP>' regex (relaxed whitespace)
+      3. Comma split ('456 Main St, Santa Cruz, CA 12345')
+      4. Newline split ('456 Main St\\nSanta Cruz, CA 12345')
+      5. Fallback: return (full, '')
+
+    Returns a tuple of plain strings; never None.
+    """
+    if not full:
+        return ("", "")
+    s = full.strip()
+    normalized = re.sub(r"\s+", " ", s.replace("\n", " ").replace("\r", " ")).strip()
+
+    for city in sorted(KNOWN_CITIES, key=len, reverse=True):
+        pattern = re.compile(
+            r"^(.*?)\s*" + re.escape(city) + r"\s*,?\s*(?:CA|California)\s*(\d{5}(?:-\d{4})?)\s*$",
+            re.IGNORECASE,
+        )
+        m = pattern.match(normalized)
+        if m:
+            line1 = m.group(1).strip(" ,")
+            csz = f"{city}, CA {m.group(2)}"
+            return (line1, csz)
+
+    generic = re.match(
+        r"^(.*?)\s*(?:CA|California)\s+(\d{5}(?:-\d{4})?)\s*$",
+        normalized,
+        re.IGNORECASE,
+    )
+    if generic:
+        before = generic.group(1).strip(" ,")
+        return (before, f"CA {generic.group(2)}")
+
+    if "," in s:
+        parts = s.split(",", 1)
+        return (parts[0].strip(), parts[1].strip())
+
+    if "\n" in s:
+        parts = s.split("\n", 1)
+        return (parts[0].strip(), parts[1].strip())
+
+    return (s, "")
+
+
 # --- Helpers ---
 
 
@@ -840,12 +892,18 @@ def _insert_borderless_table(
     rows_data: list,
     ref_paragraph,
     left_indent_twips: int = 0,
+    body_para_right_indent_twips: int = 1504,
 ) -> None:
     """Create a 1-column borderless table and insert it before the given XML element.
 
     rows_data: list of strings, one per row.
     ref_paragraph: a paragraph whose font formatting is copied to every cell.
-    left_indent_twips: left indent for the table (in twips/dxa), matched to body paragraphs.
+    left_indent_twips: left indent for the table (in twips/dxa), matched to the
+      preceding body paragraph's w:left so the table's left edge aligns with body text.
+    body_para_right_indent_twips: the target paragraph's w:right value (default 1504
+      dxa = 1.04", matching the template's standard BodyText right indent). The table's
+      right edge is placed at (usable_body_width − this), so all tables share a single
+      visual right edge even when their tblInd differs.
     """
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
@@ -889,6 +947,9 @@ def _insert_borderless_table(
     # Compute usable body width from section margins (letter size, fallback to 9360 dxa).
     # Without an explicit tblW, OOXML defaults to auto-sizing — tables collapse to
     # content width and don't extend to the body paragraph right margin.
+    # With Path Y: table width = usable − tblInd − body_paragraph_right_indent,
+    # so each table's right edge lands at the same visual column as body text
+    # (usable_body_width − body_para_right_indent_twips from the left margin).
     try:
         pgMar = doc.sections[0]._sectPr.find(qn("w:pgMar"))
         if pgMar is not None:
@@ -899,7 +960,10 @@ def _insert_borderless_table(
             usable_body_width = 9360
     except (AttributeError, ValueError, TypeError):
         usable_body_width = 9360
-    table_width = max(usable_body_width - int(left_indent_twips), 1)
+    table_width = max(
+        usable_body_width - int(left_indent_twips) - int(body_para_right_indent_twips),
+        1,
+    )
 
     tblW = OxmlElement("w:tblW")
     tblW.set(qn("w:w"), str(table_width))
@@ -1082,10 +1146,16 @@ async def generate_notice(req: GenerateNoticeRequest):
 
     # Build landlord address block.
     # Prefer explicit city/state/zip fields (formatted as "City, ST 12345");
-    # fall back to parsing a combined blob when only landlord_address is provided.
+    # otherwise parse a combined blob via KNOWN_CITIES so smashed Airtable values
+    # like "Santa CruzCA12345" split cleanly into street-line1 + "Santa Cruz, CA 12345".
     landlord_full = req.landlord_address or req.payment_address
     if req.landlord_city or req.landlord_state or req.landlord_zip:
-        landlord_addr_line1 = landlord_full.strip()
+        # When the caller sent structured fields, the 'landlord_full' input represents
+        # the street line only; still run it through the parser in case a trailer
+        # (e.g. "Main St Santa Cruz CA 12345") leaked in. If the parser finds a
+        # trailer, keep the cleaner street portion; otherwise use as-is.
+        parsed_line1, _parsed_csz = _parse_landlord_address(landlord_full)
+        landlord_addr_line1 = parsed_line1 if parsed_line1 else landlord_full.strip()
         city = req.landlord_city
         state = req.landlord_state
         zipc = req.landlord_zip
@@ -1101,13 +1171,7 @@ async def generate_notice(req: GenerateNoticeRequest):
             csz = f"{csz} {zipc}".strip()
         landlord_city_state_zip = csz
     else:
-        ll_parts = landlord_full.split(",", 1)
-        if len(ll_parts) == 2:
-            landlord_addr_line1 = ll_parts[0].strip()
-            landlord_city_state_zip = ll_parts[1].strip()
-        else:
-            landlord_addr_line1 = landlord_full
-            landlord_city_state_zip = ""
+        landlord_addr_line1, landlord_city_state_zip = _parse_landlord_address(landlord_full)
 
     # Load template
     doc = Document(str(template_path))
