@@ -2,6 +2,7 @@ print("STARTUP: importing stdlib...", flush=True)
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -121,6 +122,56 @@ DAY_COUNT_WORDS = {
     15: ("fifteen", "FIFTEEN"),
     30: ("thirty", "THIRTY"),
 }
+
+# Blueprint Evictions service-area cities (defensive trailer stripper for street blobs
+# where city/state/zip got concatenated into the street field, e.g. Airtable data like
+# "123 Main St Santa Cruz CA 98598"). Sorted longest-first at match time so
+# "East Palo Alto" matches before "Palo Alto".
+KNOWN_CITIES = [
+    "San Jose", "Santa Clara", "Sunnyvale", "Mountain View", "Cupertino", "Milpitas",
+    "Los Gatos", "Saratoga", "Campbell", "Gilroy", "Morgan Hill", "Palo Alto",
+    "Los Altos", "Los Altos Hills", "Monte Sereno", "Alum Rock",
+    "East Palo Alto", "Redwood City", "San Mateo", "Daly City", "South San Francisco",
+    "Burlingame", "Menlo Park", "Foster City", "San Carlos", "Belmont", "Millbrae",
+    "Atherton", "Brisbane", "Colma", "Half Moon Bay", "Hillsborough", "Pacifica",
+    "Portola Valley", "San Bruno", "Woodside",
+    "Oakland", "Berkeley", "Fremont", "Hayward", "Pleasanton", "Dublin", "Livermore",
+    "Union City", "San Leandro", "Alameda", "Newark", "Emeryville", "Albany",
+    "Santa Cruz", "Scotts Valley", "Capitola", "Watsonville", "Aptos",
+    "Walnut Creek", "Concord", "Richmond", "Antioch", "Pittsburg", "Martinez",
+    "San Ramon", "Danville", "Lafayette", "Orinda",
+    "San Francisco",
+    "Hollister", "San Juan Bautista",
+]
+
+
+def _strip_city_state_zip_trailer(street_blob: str) -> str:
+    """Strip a '<City> CA <ZIP>' trailer from a street-address blob.
+
+    Airtable's 'Tenant's Property Address' sometimes contains the full concatenated
+    address (e.g. '123 Main St Santa Cruz CA 98598') with no comma delimiter.
+    When the workflow also sends a separate city/state/zip line, that full blob ends up
+    in {{PROPERTY_ADDRESS_STREET}} causing a duplicate render on the notice.
+
+    This is defensive: n8n should also strip this before sending. If neither runs,
+    the trailer remains and you'll see duplication — but never dropped street data.
+    """
+    if not street_blob:
+        return street_blob
+    s = street_blob.strip()
+    for city in sorted(KNOWN_CITIES, key=len, reverse=True):
+        pattern = re.compile(
+            r"\s+" + re.escape(city) + r"\s*,?\s*CA\s+\d{5}(?:-\d{4})?\s*$",
+            re.IGNORECASE,
+        )
+        m = pattern.search(s)
+        if m:
+            return s[: m.start()].rstrip(" ,")
+    fallback = re.compile(r"\s+CA\s+\d{5}(?:-\d{4})?\s*$")
+    m = fallback.search(s)
+    if m:
+        return s[: m.start()].rstrip(" ,")
+    return s
 
 
 # --- Helpers ---
@@ -835,9 +886,24 @@ def _insert_borderless_table(
         tblCellMar.append(m)
     tblPr.append(tblCellMar)
 
+    # Compute usable body width from section margins (letter size, fallback to 9360 dxa).
+    # Without an explicit tblW, OOXML defaults to auto-sizing — tables collapse to
+    # content width and don't extend to the body paragraph right margin.
+    try:
+        pgMar = doc.sections[0]._sectPr.find(qn("w:pgMar"))
+        if pgMar is not None:
+            left_margin = int(pgMar.get(qn("w:left")) or 1440)
+            right_margin = int(pgMar.get(qn("w:right")) or 1440)
+            usable_body_width = 12240 - left_margin - right_margin
+        else:
+            usable_body_width = 9360
+    except (AttributeError, ValueError, TypeError):
+        usable_body_width = 9360
+    table_width = max(usable_body_width - int(left_indent_twips), 1)
+
     tblW = OxmlElement("w:tblW")
-    tblW.set(qn("w:w"), "0")
-    tblW.set(qn("w:type"), "auto")
+    tblW.set(qn("w:w"), str(table_width))
+    tblW.set(qn("w:type"), "dxa")
     tblPr.append(tblW)
 
     ref_run = ref_paragraph.runs[0] if ref_paragraph.runs else None
@@ -846,6 +912,12 @@ def _insert_borderless_table(
         tcPr = cell._element.get_or_add_tcPr()
         for shd in tcPr.findall(qn("w:shd")):
             tcPr.remove(shd)
+        for old_tcW in tcPr.findall(qn("w:tcW")):
+            tcPr.remove(old_tcW)
+        tcW = OxmlElement("w:tcW")
+        tcW.set(qn("w:w"), str(table_width))
+        tcW.set(qn("w:type"), "dxa")
+        tcPr.append(tcW)
         tcMar = OxmlElement("w:tcMar")
         for side in ("top", "left", "bottom", "right"):
             m = OxmlElement(f"w:{side}")
@@ -976,6 +1048,9 @@ async def generate_notice(req: GenerateNoticeRequest):
     req.property_address = sanitize(req.property_address)
     req.property_address_street = sanitize(req.property_address_street) if req.property_address_street else ""
     req.property_address_city = sanitize(req.property_address_city) if req.property_address_city else ""
+    # Defense-in-depth: strip any '<City> CA <ZIP>' trailer that leaked into the
+    # street field so {{PROPERTY_ADDRESS_STREET}} doesn't duplicate city/state/zip.
+    req.property_address_street = _strip_city_state_zip_trailer(req.property_address_street)
     req.county = sanitize(req.county)
     req.total_amount_due = sanitize(req.total_amount_due)
     req.service_date = sanitize(req.service_date)
