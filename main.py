@@ -890,6 +890,7 @@ def _insert_paragraphs_before(
     insert_before_element,
     lines: list,
     ref_paragraph,
+    zero_spacing: bool = False,
 ) -> None:
     """Insert N plain paragraphs (one per string in `lines`) before the given XML element.
 
@@ -898,6 +899,11 @@ def _insert_paragraphs_before(
     of ref_paragraph's first run. This makes the new paragraphs render with the
     same formatting as the tenant property-address paragraphs that the template
     already aligns correctly.
+
+    When `zero_spacing=True`, the cloned pPr has its w:spacing element stripped so
+    the inserted paragraphs don't inherit the ref's before/after spacing. Stacking
+    3-4 cloned paragraphs with full body spacing (e.g. 221 twips before) otherwise
+    pushes later blocks to a new page.
     """
     from copy import deepcopy
     from docx.oxml import OxmlElement
@@ -913,7 +919,12 @@ def _insert_paragraphs_before(
     for line in lines:
         p = OxmlElement("w:p")
         if ref_pPr is not None:
-            p.append(deepcopy(ref_pPr))
+            cloned_pPr = deepcopy(ref_pPr)
+            if zero_spacing:
+                sp = cloned_pPr.find(qn("w:spacing"))
+                if sp is not None:
+                    cloned_pPr.remove(sp)
+            p.append(cloned_pPr)
         r = OxmlElement("w:r")
         if ref_rPr is not None:
             r.append(deepcopy(ref_rPr))
@@ -924,6 +935,18 @@ def _insert_paragraphs_before(
         p.append(r)
         parent.insert(idx, p)
         idx += 1
+
+
+def _find_body_ref_paragraph(doc):
+    """Locate the body paragraph used as the canonical left-indent reference
+    for landlord blocks: "Payment of the above..." (w:left=355-393). Both the
+    owner block (page 1) and housing-provider block (page 3) clone this
+    paragraph's w:pPr so they align with the body text.
+    """
+    for para in doc.paragraphs:
+        if "Payment of the above" in para.text:
+            return para
+    return None
 
 
 def _replace_owner_block_with_paragraphs(
@@ -952,10 +975,10 @@ def _replace_owner_block_with_paragraphs(
             if "{{LANDLORD_ADDRESS}}" in nxt2:
                 to_remove.append(paras[i + 2]._element)
 
-        ref_para = paras[i - 1] if i > 0 else para
+        ref_para = _find_body_ref_paragraph(doc) or (paras[i - 1] if i > 0 else para)
 
         lines = [owner_name, addr_line1, city_state_zip]
-        _insert_paragraphs_before(to_remove[0], lines, ref_para)
+        _insert_paragraphs_before(to_remove[0], lines, ref_para, zero_spacing=True)
         for el in to_remove:
             body.remove(el)
         return
@@ -967,9 +990,10 @@ def _replace_housing_provider_block_with_paragraphs(
     """Replace the Housing Provider's / Landlord's Address block with 4 plain paragraphs
     (label / street / city-state-zip / phone).
 
-    Each new paragraph inherits w:pPr from the original label paragraph
-    ("Housing Provider's Address:" — w:left=3248), so all four rows render at the
-    same indent that the label already carried.
+    Clones w:pPr from the "Payment of the above..." body paragraph (w:left=393),
+    same reference used by the owner block on page 1, so all four rows left-align
+    to the body edge. w:spacing is stripped so 4 stacked paragraphs don't inherit
+    the ref's 221-twip before-spacing that would push this block to its own page.
     """
     body = doc.element.body
     paras = list(doc.paragraphs)
@@ -991,8 +1015,9 @@ def _replace_housing_provider_block_with_paragraphs(
             else:
                 break
 
+        ref_para = _find_body_ref_paragraph(doc) or para
         lines = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
-        _insert_paragraphs_before(to_remove[0], lines, para)
+        _insert_paragraphs_before(to_remove[0], lines, ref_para, zero_spacing=True)
         for el in to_remove:
             body.remove(el)
         return
@@ -1148,7 +1173,11 @@ async def generate_notice(req: GenerateNoticeRequest):
         "LANDLORD_COMPANY": "",
         "LANDLORD_ADDRESS": landlord_full,
         "LANDLORD_PHONE": req.landlord_phone,
-        "DATE_SERVED": req.service_date,
+        # DATE_SERVED is ALWAYS blank — the process server fills it in by hand at
+        # service time. n8n has historically sent computed dates here (notice_date,
+        # service_date); hardcoding on the Railway side makes rendering immune to
+        # whatever upstream workflows end up passing in.
+        "DATE_SERVED": "________",
         "NOTICE_HEADER": notice_header,
     }
 
