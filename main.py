@@ -886,129 +886,55 @@ def _get_paragraph_left_indent_twips(paragraph) -> int:
         return 0
 
 
-def _insert_borderless_table(
-    doc,
+def _insert_paragraphs_before(
     insert_before_element,
-    rows_data: list,
+    lines: list,
     ref_paragraph,
-    left_indent_twips: int = 0,
-    body_para_right_indent_twips: int = 1504,
 ) -> None:
-    """Create a 1-column borderless table and insert it before the given XML element.
+    """Insert N plain paragraphs (one per string in `lines`) before the given XML element.
 
-    rows_data: list of strings, one per row.
-    ref_paragraph: a paragraph whose font formatting is copied to every cell.
-    left_indent_twips: left indent for the table (in twips/dxa), matched to the
-      preceding body paragraph's w:left so the table's left edge aligns with body text.
-    body_para_right_indent_twips: the target paragraph's w:right value (default 1504
-      dxa = 1.04", matching the template's standard BodyText right indent). The table's
-      right edge is placed at (usable_body_width − this), so all tables share a single
-      visual right edge even when their tblInd differs.
+    Each new paragraph clones the w:pPr (indent, alignment, tabs, spacing) of
+    `ref_paragraph`, and each run clones the w:rPr (font family, size, bold, etc.)
+    of ref_paragraph's first run. This makes the new paragraphs render with the
+    same formatting as the tenant property-address paragraphs that the template
+    already aligns correctly.
     """
-    from docx.oxml.ns import qn
+    from copy import deepcopy
     from docx.oxml import OxmlElement
-
-    table = doc.add_table(rows=len(rows_data), cols=1)
-    tbl = table._tbl
-
-    tblPr = tbl.tblPr
-    if tblPr is None:
-        tblPr = OxmlElement("w:tblPr")
-        tbl.insert(0, tblPr)
-    for old in tblPr.findall(qn("w:tblBorders")):
-        tblPr.remove(old)
-    borders = OxmlElement("w:tblBorders")
-    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
-        el = OxmlElement(f"w:{edge}")
-        el.set(qn("w:val"), "none")
-        el.set(qn("w:sz"), "0")
-        el.set(qn("w:space"), "0")
-        el.set(qn("w:color"), "auto")
-        borders.append(el)
-    tblPr.append(borders)
-
-    for old in tblPr.findall(qn("w:tblInd")):
-        tblPr.remove(old)
-    tblInd = OxmlElement("w:tblInd")
-    tblInd.set(qn("w:w"), str(int(left_indent_twips)))
-    tblInd.set(qn("w:type"), "dxa")
-    tblPr.append(tblInd)
-
-    for old in tblPr.findall(qn("w:tblCellMar")):
-        tblPr.remove(old)
-    tblCellMar = OxmlElement("w:tblCellMar")
-    for side in ("top", "left", "bottom", "right"):
-        m = OxmlElement(f"w:{side}")
-        m.set(qn("w:w"), "0")
-        m.set(qn("w:type"), "dxa")
-        tblCellMar.append(m)
-    tblPr.append(tblCellMar)
-
-    # Compute usable body width from section margins (letter size, fallback to 9360 dxa).
-    # Without an explicit tblW, OOXML defaults to auto-sizing — tables collapse to
-    # content width and don't extend to the body paragraph right margin.
-    # With Path Y: table width = usable − tblInd − body_paragraph_right_indent,
-    # so each table's right edge lands at the same visual column as body text
-    # (usable_body_width − body_para_right_indent_twips from the left margin).
-    try:
-        pgMar = doc.sections[0]._sectPr.find(qn("w:pgMar"))
-        if pgMar is not None:
-            left_margin = int(pgMar.get(qn("w:left")) or 1440)
-            right_margin = int(pgMar.get(qn("w:right")) or 1440)
-            usable_body_width = 12240 - left_margin - right_margin
-        else:
-            usable_body_width = 9360
-    except (AttributeError, ValueError, TypeError):
-        usable_body_width = 9360
-    table_width = max(
-        usable_body_width - int(left_indent_twips) - int(body_para_right_indent_twips),
-        1,
-    )
-
-    tblW = OxmlElement("w:tblW")
-    tblW.set(qn("w:w"), str(table_width))
-    tblW.set(qn("w:type"), "dxa")
-    tblPr.append(tblW)
-
-    ref_run = ref_paragraph.runs[0] if ref_paragraph.runs else None
-    for i, text in enumerate(rows_data):
-        cell = table.cell(i, 0)
-        tcPr = cell._element.get_or_add_tcPr()
-        for shd in tcPr.findall(qn("w:shd")):
-            tcPr.remove(shd)
-        for old_tcW in tcPr.findall(qn("w:tcW")):
-            tcPr.remove(old_tcW)
-        tcW = OxmlElement("w:tcW")
-        tcW.set(qn("w:w"), str(table_width))
-        tcW.set(qn("w:type"), "dxa")
-        tcPr.append(tcW)
-        tcMar = OxmlElement("w:tcMar")
-        for side in ("top", "left", "bottom", "right"):
-            m = OxmlElement(f"w:{side}")
-            m.set(qn("w:w"), "0")
-            m.set(qn("w:type"), "dxa")
-            tcMar.append(m)
-        tcPr.append(tcMar)
-
-        para = cell.paragraphs[0]
-        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        run = para.add_run(text)
-        if ref_run:
-            run.font.size = ref_run.font.size
-            run.font.name = ref_run.font.name
-            run.font.bold = ref_run.font.bold
-            run.font.italic = ref_run.font.italic
+    from docx.oxml.ns import qn
 
     parent = insert_before_element.getparent()
-    parent.insert(parent.index(insert_before_element), tbl)
+    idx = parent.index(insert_before_element)
+
+    ref_pPr = ref_paragraph._p.find(qn("w:pPr"))
+    ref_run = ref_paragraph.runs[0] if ref_paragraph.runs else None
+    ref_rPr = ref_run._element.find(qn("w:rPr")) if ref_run is not None else None
+
+    for line in lines:
+        p = OxmlElement("w:p")
+        if ref_pPr is not None:
+            p.append(deepcopy(ref_pPr))
+        r = OxmlElement("w:r")
+        if ref_rPr is not None:
+            r.append(deepcopy(ref_rPr))
+        t = OxmlElement("w:t")
+        t.text = line
+        t.set(qn("xml:space"), "preserve")
+        r.append(t)
+        p.append(r)
+        parent.insert(idx, p)
+        idx += 1
 
 
-def _replace_owner_block_with_table(doc, owner_name: str, addr_line1: str, city_state_zip: str) -> None:
-    """Replace the LANDLORD_NAME / COMPANY / ADDRESS paragraphs with a 3-row borderless table.
+def _replace_owner_block_with_paragraphs(
+    doc, owner_name: str, addr_line1: str, city_state_zip: str
+) -> None:
+    """Replace the LANDLORD_NAME / COMPANY / ADDRESS template paragraphs with 3 plain
+    paragraphs (name / street / city-state-zip).
 
-    The table's left indent is taken from the preceding body paragraph (e.g. "Payment of the
-    above total amount due...") so the table aligns with surrounding body text instead of
-    hanging off the page margin.
+    Each new paragraph inherits w:pPr from the preceding body paragraph
+    ("Payment of the above..." — w:left=393, w:right=1504), matching the approach
+    used for the tenant property address that renders correctly.
     """
     body = doc.element.body
     paras = list(doc.paragraphs)
@@ -1026,23 +952,24 @@ def _replace_owner_block_with_table(doc, owner_name: str, addr_line1: str, city_
             if "{{LANDLORD_ADDRESS}}" in nxt2:
                 to_remove.append(paras[i + 2]._element)
 
-        indent = _get_paragraph_left_indent_twips(paras[i - 1]) if i > 0 else 0
+        ref_para = paras[i - 1] if i > 0 else para
 
-        rows = [owner_name, addr_line1, city_state_zip]
-        _insert_borderless_table(doc, to_remove[0], rows, para, left_indent_twips=indent)
+        lines = [owner_name, addr_line1, city_state_zip]
+        _insert_paragraphs_before(to_remove[0], lines, ref_para)
         for el in to_remove:
             body.remove(el)
         return
 
 
-def _replace_housing_provider_block_with_table(
+def _replace_housing_provider_block_with_paragraphs(
     doc, addr_line1: str, city_state_zip: str, phone: str
 ) -> None:
-    """Replace the Housing Provider's / Landlord's Address block with a 4-row borderless table.
+    """Replace the Housing Provider's / Landlord's Address block with 4 plain paragraphs
+    (label / street / city-state-zip / phone).
 
-    The label paragraph in the template carries its own left indent (e.g. w:left="3248"),
-    which is propagated to the table so all four rows stay aligned with the original label
-    position instead of snapping to the page margin.
+    Each new paragraph inherits w:pPr from the original label paragraph
+    ("Housing Provider's Address:" — w:left=3248), so all four rows render at the
+    same indent that the label already carried.
     """
     body = doc.element.body
     paras = list(doc.paragraphs)
@@ -1064,10 +991,8 @@ def _replace_housing_provider_block_with_table(
             else:
                 break
 
-        indent = _get_paragraph_left_indent_twips(para)
-
-        rows = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
-        _insert_borderless_table(doc, to_remove[0], rows, para, left_indent_twips=indent)
+        lines = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
+        _insert_paragraphs_before(to_remove[0], lines, para)
         for el in to_remove:
             body.remove(el)
         return
@@ -1201,11 +1126,11 @@ async def generate_notice(req: GenerateNoticeRequest):
     amounts_data = [{"due_date": a.due_date, "amount": a.amount} for a in req.amounts_due]
     _fill_amounts_paragraph(doc, amounts_data)
 
-    # --- Step 2b: Replace owner/address blocks with borderless tables ---
-    _replace_owner_block_with_table(
+    # --- Step 2b: Replace owner/address blocks with plain paragraphs ---
+    _replace_owner_block_with_paragraphs(
         doc, req.landlord_name, landlord_addr_line1, landlord_city_state_zip
     )
-    _replace_housing_provider_block_with_table(
+    _replace_housing_provider_block_with_paragraphs(
         doc, landlord_addr_line1, landlord_city_state_zip, req.landlord_phone
     )
 
