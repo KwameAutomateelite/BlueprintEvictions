@@ -419,14 +419,36 @@ def generate_notice_pdf(notice_type: str, fields: dict) -> str:
 
 
 async def download_file(url: str) -> str:
-    """Download a file from URL to a temp path and return the path."""
+    """Download a file from URL to a temp path and return the path.
+
+    Detects DOCX vs PDF from magic bytes + Content-Type so the Approve path
+    can pull the LIVE DOCX from OneDrive (preserving manual edits made in
+    Word) instead of regenerating from template. DOCX files are then converted
+    to PDF downstream before being sent to Dropbox Sign.
+    """
     async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
         resp = await client.get(url)
         resp.raise_for_status()
+        content = resp.content
+        ctype = resp.headers.get("content-type", "").lower()
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp.write(resp.content)
+    # DOCX is a ZIP — starts with "PK". PDF starts with "%PDF".
+    is_docx = (
+        content[:2] == b"PK"
+        or "wordprocessingml" in ctype
+        or "vnd.openxmlformats" in ctype
+    )
+    is_pdf = content[:4] == b"%PDF" or "application/pdf" in ctype
+
+    if is_docx and not is_pdf:
+        suffix = ".docx"
+    else:
+        suffix = ".pdf"
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(content)
     tmp.close()
+    logger.info(f"download_file: saved {tmp.name} size={len(content)} ctype={ctype}")
     return tmp.name
 
 
@@ -593,19 +615,22 @@ async def send_signature(req: SendSignatureRequest):
         raise HTTPException(status_code=400, detail=f"Failed to prepare PDF: {str(e)}")
     logger.info(f"DEBUG final file_path={file_path} size={os.path.getsize(file_path)}")
 
+    # Normalize to PDF. When file_url points at a live OneDrive DOCX (the Approve
+    # path after AM manually edits in Word), download_file saves it with a .docx
+    # suffix. Convert to PDF here so Dropbox Sign always receives PDF.
+    if file_path.endswith(".docx"):
+        docx_path = file_path
+        file_path = convert_docx_to_pdf(docx_path)
+        try:
+            os.unlink(docx_path)
+        except OSError:
+            pass
+
     # Merge attachment PDFs if required
     original_file_path = file_path
     if req.attachments_required:
         logger.info(f"Merging {len(req.attachments_required)} attachments: {req.attachments_required}")
-        # Convert DOCX to PDF first if needed (file_url branch gives PDF, template branch gives DOCX)
-        if file_path.endswith(".pdf"):
-            notice_pdf = file_path
-        else:
-            notice_pdf = convert_docx_to_pdf(file_path)
-            try:
-                os.unlink(file_path)
-            except OSError:
-                pass
+        notice_pdf = file_path
         file_path = merge_attachment_pdfs(notice_pdf, req.attachments_required)
         if file_path != notice_pdf:
             try:
@@ -788,9 +813,17 @@ def _fill_cell_with_values(cell, values: list, template_paragraph) -> None:
     else:
         template_paragraph.text = values[0]
 
-    # Add additional paragraphs for remaining values, copying formatting
+    # Add additional paragraphs for remaining values, copying formatting.
+    # Strip w:spacing from cloned pPr so 3+ amount rows don't stack ~200 twips
+    # before-spacing each — which pushes the body long enough to force the
+    # California-notices block onto a third page with an orphan page 2 behind it.
     for val in values[1:]:
         new_para = deepcopy(template_paragraph._element)
+        cloned_pPr = new_para.find(qn("w:pPr"))
+        if cloned_pPr is not None:
+            sp = cloned_pPr.find(qn("w:spacing"))
+            if sp is not None:
+                cloned_pPr.remove(sp)
         # Clear text in the cloned paragraph, then set new value
         for r in new_para.findall(qn("w:r")):
             new_para.remove(r)
@@ -984,6 +1017,41 @@ def _replace_owner_block_with_paragraphs(
         return
 
 
+def _compact_empty_paragraphs_before_heading(doc, heading_substring: str) -> int:
+    """Remove consecutive empty/whitespace-only paragraphs directly preceding any
+    paragraph whose text contains ``heading_substring``.
+
+    On multi-row AMOUNTS_DUE renders (3+ rows) the body lands just past page 2's
+    bottom margin, so the "NOTICES FROM THE STATE OF CALIFORNIA:" block gets
+    pushed to page 3, leaving page 2 nearly empty. Collapsing the handful of
+    throwaway spacer paragraphs the template ships with pulls the heading back
+    up so the California block starts on page 2 in those cases.
+
+    Returns the number of empty paragraphs removed.
+    """
+    from docx.oxml.ns import qn
+
+    body = doc.element.body
+    paras = list(doc.paragraphs)
+    removed = 0
+    for i, para in enumerate(paras):
+        if heading_substring not in para.text:
+            continue
+        j = i - 1
+        while j >= 0:
+            prev_text = "".join(r.text for r in paras[j].runs).strip()
+            if prev_text:
+                break
+            prev_el = paras[j]._element
+            if prev_el.find(qn("w:pPr")) is not None and prev_el.find(qn("w:pPr")).find(qn("w:sectPr")) is not None:
+                break
+            body.remove(prev_el)
+            removed += 1
+            j -= 1
+        break
+    return removed
+
+
 def _replace_housing_provider_block_with_paragraphs(
     doc, addr_line1: str, city_state_zip: str, phone: str
 ) -> None:
@@ -1158,6 +1226,13 @@ async def generate_notice(req: GenerateNoticeRequest):
     _replace_housing_provider_block_with_paragraphs(
         doc, landlord_addr_line1, landlord_city_state_zip, req.landlord_phone
     )
+
+    # --- Step 2c: Pull California notices up to avoid orphan page 2 ---
+    removed = _compact_empty_paragraphs_before_heading(
+        doc, "NOTICES FROM THE STATE OF CALIFORNIA"
+    )
+    if removed:
+        logger.info(f"generate-notice: stripped {removed} empty para(s) before California heading")
 
     # --- Step 3: Replace standard placeholders ---
     # LANDLORD_NAME, LANDLORD_COMPANY, LANDLORD_ADDRESS, and LANDLORD_PHONE are
