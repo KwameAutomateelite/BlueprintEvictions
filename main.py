@@ -1289,12 +1289,47 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     value_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     _set_paragraph_spacing_explicit(value_para, before=0, after=0)
 
+    from docx.oxml import OxmlElement
+
     body = doc.element.body
     for para in list(doc.paragraphs):
         text = para.text.strip()
         if not text.upper().startswith("TOTAL AMOUNT DUE"):
             continue
-        body.remove(para._element)
+        total_p = para._element
+
+        # Both templates park empty BodyText paragraphs between the rent table
+        # and the standalone TOTAL paragraph (residential: 1; commercial: 5+)
+        # to push TOTAL down the page. With TOTAL relocated into the table,
+        # those empties become a 1–2 line dead gap above "You are further
+        # notified". Walk back from TOTAL and drop each preceding empty <w:p>
+        # until we hit non-empty content or the table.
+        prev = total_p.getprevious()
+        while prev is not None and prev.tag == qn("w:p"):
+            prev_text = "".join(t.text or "" for t in prev.findall(".//" + qn("w:t"))).strip()
+            if prev_text:
+                break
+            to_remove = prev
+            prev = prev.getprevious()
+            body.remove(to_remove)
+
+        # Normalize the "You are further notified" paragraph's w:before to one
+        # line (240 twips at 11pt). Residential ships at 257, commercial at
+        # 150 — pinning to 240 gives a consistent single-line gap below the
+        # in-table TOTAL row across both templates.
+        nxt = total_p.getnext()
+        if nxt is not None and nxt.tag == qn("w:p"):
+            pPr = nxt.find(qn("w:pPr"))
+            if pPr is None:
+                pPr = OxmlElement("w:pPr")
+                nxt.insert(0, pPr)
+            sp = pPr.find(qn("w:spacing"))
+            if sp is None:
+                sp = OxmlElement("w:spacing")
+                pPr.append(sp)
+            sp.set(qn("w:before"), "240")
+
+        body.remove(total_p)
         return True
     return True
 
@@ -1752,15 +1787,12 @@ async def generate_notice(req: GenerateNoticeRequest):
     if removed:
         logger.info(f"generate-notice: stripped {removed} empty para(s) before California heading")
 
-    # --- Step 2d: Drop the standalone TOTAL_AMOUNT_DUE paragraph (Heading1).
-    # It will be re-rendered as a row inside the rent table after global
-    # alignment normalization, so the LEFT/RIGHT cell alignments stick.
-    body = doc.element.body
-    for para in list(doc.paragraphs):
-        text = para.text.strip().upper()
-        if text.startswith("TOTAL AMOUNT DUE"):
-            body.remove(para._element)
-            break
+    # The standalone TOTAL_AMOUNT_DUE Heading1 paragraph is dropped later by
+    # `_add_total_row_to_amounts_table` (Step 3e2), which also removes the
+    # empty BodyText paragraphs that sit between the rent table and the TOTAL
+    # paragraph in the template. Doing both removals there keeps the
+    # walk-back logic intact — pre-removing TOTAL here would leave the dead
+    # empty paragraphs orphaned above "You are further notified".
 
     # --- Step 3: Replace standard placeholders ---
     # LANDLORD_NAME, LANDLORD_COMPANY, LANDLORD_ADDRESS, and LANDLORD_PHONE are
