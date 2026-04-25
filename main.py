@@ -941,7 +941,15 @@ def _ensure_pPr(paragraph):
 
 
 def _set_paragraph_spacing_explicit(paragraph, before=None, after=None, line=None) -> None:
-    """Force explicit w:spacing values. Pass None to leave a value alone."""
+    """Force explicit w:spacing values. Pass None to leave a value alone.
+
+    Inserts a new w:spacing element in OOXML schema-correct position
+    (before w:ind / w:contextualSpacing / w:jc / etc). Word silently
+    ignores misordered child elements in pPr — appending blindly to the
+    end produced w:before values that rendered as ~0 visual gap when
+    the paragraph already had w:ind/w:jc populated (e.g. the signature
+    line, which ships with tabs+ind+jc from the template).
+    """
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
@@ -949,7 +957,27 @@ def _set_paragraph_spacing_explicit(paragraph, before=None, after=None, line=Non
     sp = pPr.find(qn("w:spacing"))
     if sp is None:
         sp = OxmlElement("w:spacing")
-        pPr.append(sp)
+        # Schema order: spacing precedes ind, contextualSpacing,
+        # mirrorIndents, suppressOverlap, jc, textDirection, rPr, sectPr.
+        anchor = None
+        for tag in (
+            "w:ind",
+            "w:contextualSpacing",
+            "w:mirrorIndents",
+            "w:suppressOverlap",
+            "w:jc",
+            "w:textDirection",
+            "w:textAlignment",
+            "w:rPr",
+            "w:sectPr",
+        ):
+            anchor = pPr.find(qn(tag))
+            if anchor is not None:
+                break
+        if anchor is not None:
+            anchor.addprevious(sp)
+        else:
+            pPr.append(sp)
     if before is not None:
         sp.set(qn("w:before"), str(before))
     if after is not None:
