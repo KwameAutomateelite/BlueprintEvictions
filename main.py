@@ -1517,6 +1517,104 @@ def _compact_empty_paragraphs_before_heading(doc, heading_substring: str) -> int
     return removed
 
 
+def _compact_for_dense_table(doc) -> int:
+    """Strip mid-document filler that pushes 12-row notices onto a 3rd page.
+
+    Document order (verified via XML dump on 2026-04-25): California section
+    [paragraphs ~29-37] already renders BEFORE the signature/HP block
+    [38-42]. The 3-page bleed is pure content density — each empty filler
+    paragraph adds ~220 twips, and the 12-row table leaves no slack on
+    page 2. This pass removes/compresses the redundant ones:
+
+      1. Empty BodyText paragraphs sitting between the post-landlord body
+         paragraphs ("Rent or possession", "Only the total amount due",
+         "You are further notified by this Notice the Landlords elect").
+      2. Mid-document continuous section-break paragraphs that hold a
+         vestigial sectPr — both inner sections share the final section's
+         pgSz/pgMar exactly, so folding them is a no-op for layout but
+         reclaims one full empty paragraph each.
+      3. Excess w:before spacing on the "This notice was served" Heading1
+         and "Payment of the above" paragraphs (templates ship 221 twips;
+         100 is enough visual breathing room).
+
+    Returns the number of paragraphs removed.
+    """
+    from docx.oxml.ns import qn
+
+    body = doc.element.body
+    paras = list(doc.paragraphs)
+
+    # ---- 1. Strip empty BodyText paragraphs immediately preceding key body anchors ----
+    anchors = (
+        "Rent or possession of the Premises may be tendered",
+        "Only the total amount due and made prior",
+        "You are further notified by this Notice the Landlords elect",
+    )
+    removed = 0
+    for anchor in anchors:
+        for i, para in enumerate(paras):
+            if anchor not in para.text:
+                continue
+            j = i - 1
+            while j >= 0:
+                prev_text = "".join(r.text for r in paras[j].runs).strip()
+                if prev_text:
+                    break
+                prev_el = paras[j]._element
+                pPr = prev_el.find(qn("w:pPr"))
+                if pPr is not None and pPr.find(qn("w:sectPr")) is not None:
+                    # Section-break empties handled in step 2.
+                    break
+                body.remove(prev_el)
+                removed += 1
+                j -= 1
+            break
+        paras = list(doc.paragraphs)  # refresh after mutation
+
+    # ---- 2. Fold mid-document continuous section breaks ----
+    # Both inner sections share the final section's pgSz/pgMar exactly, so
+    # the only meaningful payload is sec 1's footerReference/headerReference,
+    # which propagate forward via the document-final sectPr inheriting them.
+    # Word uses "the next sectPr after this point" semantics, so dropping the
+    # mid-document sectPr-bearing paragraphs simply lets the doc-end sectPr
+    # govern the whole document — visually identical, one fewer empty line.
+    for para_el in list(body.findall(qn("w:p"))):
+        pPr = para_el.find(qn("w:pPr"))
+        if pPr is None:
+            continue
+        sectPr = pPr.find(qn("w:sectPr"))
+        if sectPr is None:
+            continue
+        sect_type = sectPr.find(qn("w:type"))
+        if sect_type is None or sect_type.get(qn("w:val")) != "continuous":
+            continue
+        # Preserve any header/footer references by hoisting them onto the
+        # document-end sectPr if it doesn't already define one.
+        end_sectPr = body.find(qn("w:sectPr"))
+        if end_sectPr is not None:
+            for ref_tag in ("w:headerReference", "w:footerReference"):
+                for ref in sectPr.findall(qn(ref_tag)):
+                    # Only copy when the end sectPr doesn't already declare a ref of the same type.
+                    existing_types = {
+                        e.get(qn("w:type")) for e in end_sectPr.findall(qn(ref_tag))
+                    }
+                    if ref.get(qn("w:type")) not in existing_types:
+                        end_sectPr.insert(0, ref)
+        body.remove(para_el)
+        removed += 1
+
+    # ---- 3. Reduce w:before on the two heaviest spacers ----
+    paras = list(doc.paragraphs)
+    for para in paras:
+        text = para.text.strip()
+        if text.startswith("This notice was served to you on") or text.startswith(
+            "Payment of the above total amount due"
+        ):
+            _set_paragraph_spacing_explicit(para, before=100)
+
+    return removed
+
+
 def _replace_housing_provider_block_with_paragraphs(
     doc, addr_line1: str, city_state_zip: str, phone: str, row_count: int = 1
 ) -> None:
@@ -1796,6 +1894,16 @@ async def generate_notice(req: GenerateNoticeRequest):
         req.landlord_phone,
         row_count=len(req.amounts_due),
     )
+
+    # --- Step 2b2: Dense-table compression (5+ rows) ---
+    # XML dump on 2026-04-25 confirmed California section already renders
+    # BEFORE signature/HP in document order. The 3-page bleed on 12-row
+    # notices is pure content density: redundant empty paragraphs and
+    # vestigial mid-document continuous sectPrs each cost ~220 twips. Strip
+    # them only when the table is wide enough to push past page 2.
+    if len(req.amounts_due) >= 5:
+        compacted = _compact_for_dense_table(doc)
+        logger.info(f"generate-notice: dense-table compaction removed {compacted} paragraph(s)")
 
     # --- Step 2c: Pull California notices up to avoid orphan page 2 ---
     # The template ships 3 empty paragraphs between the California section's
