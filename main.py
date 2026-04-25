@@ -919,12 +919,14 @@ def _get_paragraph_left_indent_twips(paragraph) -> int:
         return 0
 
 
-# Landlord-block indent: modest 0.375" indent (540 twips) that sits visibly to the
-# right of body text but nothing close to the signature line. Per AM-approved
-# reference image: the Kwame Property block reads as "slightly indented" — about
-# 3 spaces in from body-left, not the deep 3248-twip indent the earlier "near the
-# signature line" pass produced.
-LANDLORD_BLOCK_LEFT_TWIPS = 540
+# Landlord-block indent: ~3.75" left indent (5400 twips) so the block visually
+# anchors on the RIGHT side of the page near the signature line — per AM's
+# reference image where Kwame Amankwah / 122 First Addy Dr / Santa Cruz CA 12345
+# sit right of center. Body width is 10800 twips on this template (asymmetric
+# pgMar), so a 5400 indent puts the block's left edge at the horizontal midpoint;
+# typical landlord-line text widths (~30-40 chars) then trail off to the right
+# margin, giving a right-anchored visual.
+LANDLORD_BLOCK_LEFT_TWIPS = 5400
 
 # When AMOUNTS_DUE has at least this many rows, force a hard page break before
 # the California notices heading. Below that threshold the soft compaction
@@ -1105,23 +1107,24 @@ def _fix_tenant_address_block(doc) -> None:
             _set_paragraph_alignment(paras[j], "left")
 
 
-# Rent table sizing: span full body width (~6.25" between 1" margins on Letter)
-# with two equal columns so the AMOUNT DUE column anchors at the right side of
-# the page rather than drifting toward the middle. Per AM's reference image:
-# DUE DATE column at left margin, AMOUNT DUE column at right margin.
-RENT_TABLE_BODY_WIDTH_TWIPS = 9000  # ~6.25"
-RENT_TABLE_COL_WIDTH_TWIPS = RENT_TABLE_BODY_WIDTH_TWIPS // 2  # 4500 each
+# Rent table sizing: span the full BODY width per the section's pgMar.
+# The template's pgMar is asymmetric (left=1080, right=360 on a 12240-twip page),
+# giving a body width of 12240 - 1080 - 360 = 10800 twips (~7.5"). Two equal
+# columns of 5400 twips each → DUE DATE anchors at the left margin, AMOUNT DUE
+# anchors at the right margin (per AM's reference image).
+RENT_TABLE_BODY_WIDTH_TWIPS = 10800  # = pgSz.w - pgMar.left - pgMar.right
+RENT_TABLE_COL_WIDTH_TWIPS = RENT_TABLE_BODY_WIDTH_TWIPS // 2  # 5400 each
 
 
 def _set_rent_table_column_widths(doc) -> None:
     """Force the DUE DATE / AMOUNT DUE table to span body width with two equal columns.
 
     Sets table-level fixed layout (so widths stick rather than auto-fitting to
-    content), full body-width w:tblW, fresh 2-column w:tblGrid, and matching
-    per-cell w:tcW on every cell. Run AFTER the TOTAL row has been added so
-    the new row also gets sized correctly.
+    content), full body-width w:tblW, fresh 2-column w:tblGrid, matching per-cell
+    w:tcW on every cell, AND overrides the template's leaked w:jc=center on the
+    table to w:jc=left so a sub-body-width table doesn't drift inward when the
+    section's body actually has spare room.
     """
-    from copy import deepcopy
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
@@ -1146,6 +1149,21 @@ def _set_rent_table_column_widths(doc) -> None:
             tbl_layout = OxmlElement("w:tblLayout")
             tblPr.append(tbl_layout)
         tbl_layout.set(qn("w:type"), "fixed")
+
+        # Override the template's <w:jc val="center"> on the table itself —
+        # otherwise sub-body-width tables drift inward and even body-width tables
+        # can offset slightly. Force left-anchored.
+        tbl_jc = tblPr.find(qn("w:jc"))
+        if tbl_jc is None:
+            tbl_jc = OxmlElement("w:jc")
+            tblPr.append(tbl_jc)
+        tbl_jc.set(qn("w:val"), "left")
+
+        # Drop any tblInd that would shift the table inward from body-left.
+        tbl_ind = tblPr.find(qn("w:tblInd"))
+        if tbl_ind is not None:
+            tbl_ind.set(qn("w:w"), "0")
+            tbl_ind.set(qn("w:type"), "dxa")
 
         # Total table width = body width (dxa = twips).
         tblW = tblPr.find(qn("w:tblW"))
@@ -1183,14 +1201,18 @@ def _set_rent_table_column_widths(doc) -> None:
         return
 
 
-def _force_amounts_table_cells_left(doc) -> None:
-    """Override every cell paragraph's alignment in the rent (DUE DATE / AMOUNT DUE)
-    table to w:jc=left.
+def _align_rent_table_columns(doc) -> None:
+    """Set DUE DATE column paragraphs LEFT, AMOUNT DUE column paragraphs RIGHT.
 
-    The template ships with w:jc=center on every cell paragraph in this table —
-    headers and data — and `_fill_cell_with_values` clones that pPr when adding
-    rows, so center alignment leaks into every new row. AM wants both columns
-    to read top-to-bottom left-aligned.
+    Standard accounting layout: dollar amounts right-align under the AMOUNT DUE
+    header so the digits stack vertically (e.g. $7,000.00 / $25,000.00 share a
+    right edge). DUE DATE column stays LEFT so dates read naturally from the
+    left margin.
+
+    MUST run AFTER `_force_left_align_doc` (which flattens every cell to LEFT)
+    AND AFTER `_add_total_row_to_amounts_table` (so the new TOTAL row also
+    gets the column convention). This is intentionally the LAST alignment
+    pass on the rent table.
     """
     for table in doc.tables:
         if len(table.columns) != 2:
@@ -1199,9 +1221,13 @@ def _force_amounts_table_cells_left(doc) -> None:
         if "DUE DATE" not in first_row_text or "AMOUNT DUE" not in first_row_text:
             continue
         for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
+            cells = row.cells
+            if len(cells) >= 1:
+                for paragraph in cells[0].paragraphs:
                     _set_paragraph_alignment(paragraph, "left")
+            if len(cells) >= 2:
+                for paragraph in cells[1].paragraphs:
+                    _set_paragraph_alignment(paragraph, "right")
         return
 
 
@@ -1209,10 +1235,10 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     """Move 'TOTAL AMOUNT DUE: $X' into the rent table as a final 2-cell row.
 
     Layout per AM-approved reference: 'TOTAL AMOUNT DUE:' sits LEFT-aligned in
-    column 1 (under DUE DATE column), and the dollar value sits LEFT-aligned in
-    column 2 (under AMOUNT DUE column). Both cells get a small w:before spacing
-    (120 twips) to put visible vertical breathing room between the last
-    itemized row and the total row, like a spreadsheet total.
+    column 1 (under DUE DATE column), and the dollar value sits RIGHT-aligned in
+    column 2 (under AMOUNT DUE column, anchored at the right margin like a
+    spreadsheet total). Both cells get w:before=360 spacing (~0.25", ~one line
+    height) so there's a visible blank-line gap above the TOTAL row.
 
     Returns True if the table-row swap happened, False if the rent table or
     the standalone TOTAL paragraph couldn't be located.
@@ -1241,7 +1267,7 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     run.bold = True
     run.font.size = Pt(11.5)
     label_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_paragraph_spacing_explicit(label_para, before=120, after=0)
+    _set_paragraph_spacing_explicit(label_para, before=360, after=0)
 
     value_para = value_cell.paragraphs[0]
     for r in list(value_para.runs):
@@ -1249,8 +1275,8 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     vrun = value_para.add_run(total_amount_due or "")
     vrun.bold = True
     vrun.font.size = Pt(11.5)
-    value_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_paragraph_spacing_explicit(value_para, before=120, after=0)
+    value_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _set_paragraph_spacing_explicit(value_para, before=360, after=0)
 
     body = doc.element.body
     for para in list(doc.paragraphs):
@@ -1707,11 +1733,6 @@ async def generate_notice(req: GenerateNoticeRequest):
     # and can detect landmark paragraphs by content.
     _fix_tenant_address_block(doc)
 
-    # --- Step 3c: Force left-justify on rent-table cell paragraphs ---
-    # Overrides the template's hardcoded w:jc=center on every cell paragraph
-    # (headers + data + the new TOTAL row).
-    _force_amounts_table_cells_left(doc)
-
     # --- Step 3d: Defense-in-depth on "All Other Occupants" casing ---
     # In addition to normalizing req.tenant_names before substitution, also
     # rewrite any post-substitution run text — handles the unlikely case where
@@ -1721,12 +1742,12 @@ async def generate_notice(req: GenerateNoticeRequest):
 
     # --- Step 3e: Force global left alignment on all body + cell paragraphs ---
     # AM: "Everything left-justified. NOTHING centered." Logo header lives in
-    # section headers and isn't iterated.
+    # section headers and isn't iterated. The rent table's column-specific
+    # alignment (DUE DATE LEFT, AMOUNT DUE RIGHT) is re-applied AFTER this
+    # pass via _align_rent_table_columns so it survives.
     _force_left_align_doc(doc)
 
     # --- Step 3e2: Add the TOTAL AMOUNT DUE row to the rent table ---
-    # Run AFTER _force_left_align_doc so the row's per-cell alignments
-    # (both LEFT in their respective columns) survive the global pass.
     moved_total = _add_total_row_to_amounts_table(doc, req.total_amount_due)
     logger.info(f"generate-notice: total-row inlined into table = {moved_total}")
 
@@ -1734,8 +1755,16 @@ async def generate_notice(req: GenerateNoticeRequest):
     # Run AFTER the TOTAL row is added so the new row's two cells also get
     # the body-width column sizing. Sets fixed layout + tblGrid + tcW so the
     # AMOUNT DUE column anchors at the right side of the page (per AM's
-    # reference image) instead of drifting toward the middle.
+    # reference image) and overrides the template's leaked w:jc=center.
     _set_rent_table_column_widths(doc)
+
+    # --- Step 3e4: Apply rent-table column-specific alignment (LAST PASS) ---
+    # DUE DATE column → LEFT (dates read from left margin).
+    # AMOUNT DUE column → RIGHT (dollar amounts stack on the right edge,
+    # standard accounting layout). Must run AFTER _force_left_align_doc
+    # (which flattens everything to LEFT) and AFTER _add_total_row so the
+    # TOTAL row also gets the column convention.
+    _align_rent_table_columns(doc)
 
     # --- Step 3f: Force California heading onto page 2 for high-row notices ---
     # Below the threshold, the soft compaction already keeps the doc to 2
