@@ -1107,13 +1107,12 @@ def _fix_tenant_address_block(doc) -> None:
             _set_paragraph_alignment(paras[j], "left")
 
 
-# Rent table sizing: span the full BODY width per the section's pgMar.
-# The template's pgMar is asymmetric (left=1080, right=360 on a 12240-twip page),
-# giving a body width of 12240 - 1080 - 360 = 10800 twips (~7.5"). Two equal
-# columns of 5400 twips each → DUE DATE anchors at the left margin, AMOUNT DUE
-# anchors at the right margin (per AM's reference image).
-RENT_TABLE_BODY_WIDTH_TWIPS = 10800  # = pgSz.w - pgMar.left - pgMar.right
-RENT_TABLE_COL_WIDTH_TWIPS = RENT_TABLE_BODY_WIDTH_TWIPS // 2  # 5400 each
+# Rent table sizing: AM-approved reference shows the table occupying ~65-70%
+# of body width, centered as a block on the page (DUE DATE col starts ~25%
+# from left margin, AMOUNT DUE col right edge sits ~10% from right margin).
+# 7200 twips (~5") split into two 3600-twip columns, table-level w:jc=center.
+RENT_TABLE_BODY_WIDTH_TWIPS = 7200
+RENT_TABLE_COL_WIDTH_TWIPS = RENT_TABLE_BODY_WIDTH_TWIPS // 2  # 3600 each
 
 
 def _set_rent_table_column_widths(doc) -> None:
@@ -1150,14 +1149,14 @@ def _set_rent_table_column_widths(doc) -> None:
             tblPr.append(tbl_layout)
         tbl_layout.set(qn("w:type"), "fixed")
 
-        # Override the template's <w:jc val="center"> on the table itself —
-        # otherwise sub-body-width tables drift inward and even body-width tables
-        # can offset slightly. Force left-anchored.
+        # AM-approved reference: table sits CENTERED as a block on the page
+        # (sub-body-width — 7200 of 10800 twips). Table-level w:jc=center is
+        # the correct setting here; do not flip to left.
         tbl_jc = tblPr.find(qn("w:jc"))
         if tbl_jc is None:
             tbl_jc = OxmlElement("w:jc")
             tblPr.append(tbl_jc)
-        tbl_jc.set(qn("w:val"), "left")
+        tbl_jc.set(qn("w:val"), "center")
 
         # Drop any tblInd that would shift the table inward from body-left.
         tbl_ind = tblPr.find(qn("w:tblInd"))
@@ -1202,12 +1201,14 @@ def _set_rent_table_column_widths(doc) -> None:
 
 
 def _align_rent_table_columns(doc) -> None:
-    """Set DUE DATE column paragraphs LEFT, AMOUNT DUE column paragraphs RIGHT.
+    """Set DUE DATE column paragraphs CENTER, AMOUNT DUE column paragraphs RIGHT.
 
-    Standard accounting layout: dollar amounts right-align under the AMOUNT DUE
-    header so the digits stack vertically (e.g. $7,000.00 / $25,000.00 share a
-    right edge). DUE DATE column stays LEFT so dates read naturally from the
-    left margin.
+    AM-approved reference: dates ("January 1, 2026", etc.) center within the
+    DUE DATE column under the centered "DUE DATE" header. Dollar amounts
+    right-align under the AMOUNT DUE header so digits stack on a shared right
+    edge (e.g. $7,000.00 / $25,000.00). The TOTAL row's "TOTAL AMOUNT DUE:"
+    label also lands in col 0 and so picks up CENTER — matching the target
+    where the label sits just left of center.
 
     MUST run AFTER `_force_left_align_doc` (which flattens every cell to LEFT)
     AND AFTER `_add_total_row_to_amounts_table` (so the new TOTAL row also
@@ -1224,7 +1225,7 @@ def _align_rent_table_columns(doc) -> None:
             cells = row.cells
             if len(cells) >= 1:
                 for paragraph in cells[0].paragraphs:
-                    _set_paragraph_alignment(paragraph, "left")
+                    _set_paragraph_alignment(paragraph, "center")
             if len(cells) >= 2:
                 for paragraph in cells[1].paragraphs:
                     _set_paragraph_alignment(paragraph, "right")
@@ -1257,6 +1258,16 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     if target_table is None:
         return False
 
+    # Visible blank spacer row — gives ~1 line of vertical space between the
+    # last itemized row and the TOTAL row, matching AM's reference. More
+    # reliable than tuning w:before spacing (which kept rendering too tight).
+    spacer_row = target_table.add_row()
+    for spacer_cell in spacer_row.cells:
+        for sp in spacer_cell.paragraphs:
+            for r in list(sp.runs):
+                r.text = ""
+            _set_paragraph_spacing_explicit(sp, before=0, after=0)
+
     new_row = target_table.add_row()
     label_cell, value_cell = new_row.cells[0], new_row.cells[1]
 
@@ -1266,8 +1277,8 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     run = label_para.add_run("TOTAL AMOUNT DUE:")
     run.bold = True
     run.font.size = Pt(11.5)
-    label_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    _set_paragraph_spacing_explicit(label_para, before=360, after=0)
+    label_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _set_paragraph_spacing_explicit(label_para, before=0, after=0)
 
     value_para = value_cell.paragraphs[0]
     for r in list(value_para.runs):
@@ -1276,7 +1287,7 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     vrun.bold = True
     vrun.font.size = Pt(11.5)
     value_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    _set_paragraph_spacing_explicit(value_para, before=360, after=0)
+    _set_paragraph_spacing_explicit(value_para, before=0, after=0)
 
     body = doc.element.body
     for para in list(doc.paragraphs):
