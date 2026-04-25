@@ -928,13 +928,6 @@ def _get_paragraph_left_indent_twips(paragraph) -> int:
 # margin, giving a right-anchored visual.
 LANDLORD_BLOCK_LEFT_TWIPS = 5400
 
-# When AMOUNTS_DUE has at least this many rows, force a hard page break before
-# the California notices heading. Below that threshold the soft compaction
-# logic in _compact_empty_paragraphs_before_heading already keeps the doc to
-# 2 pages without extra whitespace on page 1.
-FORCE_PAGE_BREAK_ROW_THRESHOLD = 6
-
-
 def _ensure_pPr(paragraph):
     """Return the paragraph's <w:pPr>, creating it (as the first child) if absent."""
     from docx.oxml.ns import qn
@@ -1332,29 +1325,6 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
         body.remove(total_p)
         return True
     return True
-
-
-def _force_page_break_before(doc, heading_substring: str) -> bool:
-    """Set <w:pageBreakBefore/> on the first body paragraph matching the heading.
-
-    Used to guarantee 'NOTICES FROM THE STATE OF CALIFORNIA' starts on page 2
-    regardless of how many AMOUNTS_DUE rows are rendered above. Without the
-    forced break, 12-row notices push California (and everything below it)
-    to page 3 — AM's 'three pages of a notice' failure mode.
-    """
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-
-    for para in doc.paragraphs:
-        if heading_substring not in para.text:
-            continue
-        pPr = _ensure_pPr(para)
-        pbb = pPr.find(qn("w:pageBreakBefore"))
-        if pbb is None:
-            pbb = OxmlElement("w:pageBreakBefore")
-            pPr.append(pbb)
-        return True
-    return False
 
 
 def _insert_paragraphs_before(
@@ -1781,11 +1751,24 @@ async def generate_notice(req: GenerateNoticeRequest):
     )
 
     # --- Step 2c: Pull California notices up to avoid orphan page 2 ---
-    removed = _compact_empty_paragraphs_before_heading(
+    # The template ships 3 empty paragraphs between the California section's
+    # last paragraph ("Finally, any Notice to Pay or Quit...") and the
+    # signature line. With the forced page-break-before California removed,
+    # those empties — combined with the empty para in front of the California
+    # heading itself — were orphaning signature + housing-provider block onto
+    # their own near-empty page when the rent table grew (5+ rows). Compact
+    # both gaps so the California section can flow naturally.
+    removed_ca = _compact_empty_paragraphs_before_heading(
         doc, "NOTICES FROM THE STATE OF CALIFORNIA"
     )
-    if removed:
-        logger.info(f"generate-notice: stripped {removed} empty para(s) before California heading")
+    removed_sig = _compact_empty_paragraphs_before_heading(
+        doc, "Original signed by"
+    )
+    if removed_ca or removed_sig:
+        logger.info(
+            f"generate-notice: stripped {removed_ca} empty para(s) before California, "
+            f"{removed_sig} before signature line"
+        )
 
     # The standalone TOTAL_AMOUNT_DUE Heading1 paragraph is dropped later by
     # `_add_total_row_to_amounts_table` (Step 3e2), which also removes the
@@ -1873,17 +1856,6 @@ async def generate_notice(req: GenerateNoticeRequest):
     # (which flattens everything to LEFT) and AFTER _add_total_row so the
     # TOTAL row also gets the column convention.
     _align_rent_table_columns(doc)
-
-    # --- Step 3f: Force California heading onto page 2 for high-row notices ---
-    # Below the threshold, the soft compaction already keeps the doc to 2
-    # pages without leaving page 1 visibly under-filled. Above it (12-month
-    # notices), we force the break so AM gets predictable 2-page output.
-    if len(req.amounts_due) >= FORCE_PAGE_BREAK_ROW_THRESHOLD:
-        broke = _force_page_break_before(doc, "NOTICES FROM THE STATE OF CALIFORNIA")
-        logger.info(
-            f"generate-notice: forced page-break-before California for "
-            f"{len(req.amounts_due)}-row notice = {broke}"
-        )
 
     # --- Step 4: Save to temp file ---
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
