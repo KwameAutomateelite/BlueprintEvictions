@@ -1488,15 +1488,52 @@ def _replace_housing_provider_block_with_paragraphs(
     doc, addr_line1: str, city_state_zip: str, phone: str
 ) -> None:
     """Replace the Housing Provider's / Landlord's Address block with 4 plain paragraphs
-    (label / street / city-state-zip / phone), pushed right to the signature-line
-    indent (LANDLORD_BLOCK_LEFT_TWIPS).
+    (label / street / city-state-zip / phone) stacked directly beneath the
+    "Date: (Original signed by agent/owner)" signature line.
 
-    Mirrors the page-1 owner block placement so both landlord blocks sit at the
-    same indent (close to the signature line). Spacing is forced to explicit
-    zero before/after so the four rows render as one tight unit.
+    Reads the signature paragraph's literal w:left and applies the same indent
+    to the block so both share the same paragraph indent. Empty paragraphs
+    sitting between the signature line and the original block label are
+    removed so only one line of gap (w:before=240) remains above the block.
+    Internal block lines have w:spacing stripped so the BodyText default
+    line-height applies and the four rows stack tight.
     """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
     body = doc.element.body
     paras = list(doc.paragraphs)
+
+    sig_para = None
+    sig_idx = None
+    for idx, p in enumerate(paras):
+        if "Original signed by" in p.text:
+            sig_para = p
+            sig_idx = idx
+            break
+
+    # Anchor to the tab-stop position where "(Original signed by agent/owner)"
+    # actually renders (the paragraph's w:left=473 only positions "Date:" — the
+    # parenthetical lands on the 2nd tab stop). Read tabs dynamically so the
+    # alignment tracks any future template tweak; fall back to 3896 (current
+    # template's 2nd tab stop) if the structure is missing.
+    sig_left = 3896
+    if sig_para is not None:
+        sig_pPr = sig_para._p.find(qn("w:pPr"))
+        if sig_pPr is not None:
+            tabs_el = sig_pPr.find(qn("w:tabs"))
+            if tabs_el is not None:
+                tab_positions = []
+                for tab in tabs_el.findall(qn("w:tab")):
+                    pos = tab.get(qn("w:pos"))
+                    if pos is not None:
+                        try:
+                            tab_positions.append(int(pos))
+                        except ValueError:
+                            pass
+                if len(tab_positions) >= 2:
+                    sig_left = tab_positions[1]
+
     for i, para in enumerate(paras):
         text = para.text.strip()
         if "Housing Provider" not in text and "Landlord's Address" not in text:
@@ -1515,17 +1552,45 @@ def _replace_housing_provider_block_with_paragraphs(
             else:
                 break
 
+        if sig_idx is not None and sig_idx < i:
+            for k in range(sig_idx + 1, i):
+                k_text = "".join(r.text for r in paras[k].runs).strip()
+                if not k_text:
+                    body.remove(paras[k]._element)
+
         ref_para = _find_body_ref_paragraph(doc) or para
         lines = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
         _insert_paragraphs_before(
             to_remove[0],
             lines,
             ref_para,
-            zero_spacing=True,
-            left_indent=LANDLORD_BLOCK_LEFT_TWIPS,
+            zero_spacing=False,
+            left_indent=sig_left,
         )
         for el in to_remove:
             body.remove(el)
+
+        target_texts = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
+        found = []
+        for p in doc.paragraphs:
+            if len(found) >= 4:
+                break
+            if p.text.strip() == target_texts[len(found)]:
+                found.append(p)
+        if len(found) == 4:
+            pPr0 = _ensure_pPr(found[0])
+            sp0 = pPr0.find(qn("w:spacing"))
+            if sp0 is None:
+                sp0 = OxmlElement("w:spacing")
+                pPr0.append(sp0)
+            sp0.set(qn("w:before"), "240")
+            sp0.set(qn("w:after"), "0")
+            for q in found[1:]:
+                pPr_q = q._p.find(qn("w:pPr"))
+                if pPr_q is not None:
+                    sp_q = pPr_q.find(qn("w:spacing"))
+                    if sp_q is not None:
+                        pPr_q.remove(sp_q)
         return
 
 
