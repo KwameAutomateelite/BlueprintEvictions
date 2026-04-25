@@ -919,11 +919,12 @@ def _get_paragraph_left_indent_twips(paragraph) -> int:
         return 0
 
 
-# Landlord-block indent: matches the template's signature-line / housing-provider
-# block position so both the page-1 owner block and the page-3 housing-provider
-# block visually sit "closer to the signature line" (per AM's 3 PM call) instead
-# of at body-left.
-LANDLORD_BLOCK_LEFT_TWIPS = 3248
+# Landlord-block indent: modest 0.375" indent (540 twips) that sits visibly to the
+# right of body text but nothing close to the signature line. Per AM-approved
+# reference image: the Kwame Property block reads as "slightly indented" — about
+# 3 spaces in from body-left, not the deep 3248-twip indent the earlier "near the
+# signature line" pass produced.
+LANDLORD_BLOCK_LEFT_TWIPS = 540
 
 # When AMOUNTS_DUE has at least this many rows, force a hard page break before
 # the California notices heading. Below that threshold the soft compaction
@@ -1051,23 +1052,26 @@ def _enforce_all_other_occupants_in_doc(doc) -> None:
                     _fix_paragraph(paragraph)
 
 
+TENANT_BLOCK_LEFT_TWIPS = 720  # 0.5" — matches AM-approved reference image indent.
+
+
 def _fix_tenant_address_block(doc) -> None:
     """Group street/city/COUNTY OF as a single visual unit on page 1.
 
     Template ships with three separate paragraphs for the property address
     (PROPERTY_ADDRESS_STREET, PROPERTY_ADDRESS_CITY, COUNTY OF {{COUNTY}}),
     plus an empty spacer paragraph between the city line and COUNTY OF, and
-    a different left-indent on the COUNTY line (1085 vs 355 for the other
-    two). After placeholder substitution we:
+    a different left-indent on the COUNTY line. After placeholder substitution:
 
-      1. add visible spacing AFTER the 'situated at:' line (paragraph break
-         before the street),
-      2. zero out before/after spacing on street and city lines so they
-         render as one tight block,
+      1. add visible spacing AFTER the 'situated at:' line,
+      2. zero before/after spacing on street and city lines so they render
+         as one tight block,
       3. drop the empty spacer between city and COUNTY OF,
-      4. normalize COUNTY OF to the same indent (355 dxa) as street/city
-         and add visible spacing AFTER it (paragraph break before the
-         '[hereinafter called the "Premises"]' line).
+      4. apply a uniform 0.5" indent (TENANT_BLOCK_LEFT_TWIPS) to all three
+         lines so the block sits visibly indented from body text per the
+         AM-approved reference image, then add visible spacing AFTER the
+         COUNTY line (paragraph break before '[hereinafter called the
+         "Premises"]').
     """
     body = doc.element.body
     paras = list(doc.paragraphs)
@@ -1088,7 +1092,7 @@ def _fix_tenant_address_block(doc) -> None:
 
     _set_paragraph_spacing_explicit(paras[situated_idx], after=240)
     _set_paragraph_spacing_explicit(paras[county_idx], before=0, after=240)
-    _set_paragraph_indent(paras[county_idx], left=355)
+    _set_paragraph_indent(paras[county_idx], left=TENANT_BLOCK_LEFT_TWIPS)
     _set_paragraph_alignment(paras[county_idx], "left")
 
     for j in range(situated_idx + 1, county_idx):
@@ -1097,8 +1101,86 @@ def _fix_tenant_address_block(doc) -> None:
             body.remove(paras[j]._element)
         else:
             _set_paragraph_spacing_explicit(paras[j], before=0, after=0)
-            _set_paragraph_indent(paras[j], left=355)
+            _set_paragraph_indent(paras[j], left=TENANT_BLOCK_LEFT_TWIPS)
             _set_paragraph_alignment(paras[j], "left")
+
+
+# Rent table sizing: span full body width (~6.25" between 1" margins on Letter)
+# with two equal columns so the AMOUNT DUE column anchors at the right side of
+# the page rather than drifting toward the middle. Per AM's reference image:
+# DUE DATE column at left margin, AMOUNT DUE column at right margin.
+RENT_TABLE_BODY_WIDTH_TWIPS = 9000  # ~6.25"
+RENT_TABLE_COL_WIDTH_TWIPS = RENT_TABLE_BODY_WIDTH_TWIPS // 2  # 4500 each
+
+
+def _set_rent_table_column_widths(doc) -> None:
+    """Force the DUE DATE / AMOUNT DUE table to span body width with two equal columns.
+
+    Sets table-level fixed layout (so widths stick rather than auto-fitting to
+    content), full body-width w:tblW, fresh 2-column w:tblGrid, and matching
+    per-cell w:tcW on every cell. Run AFTER the TOTAL row has been added so
+    the new row also gets sized correctly.
+    """
+    from copy import deepcopy
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    for table in doc.tables:
+        if len(table.columns) != 2 or not table.rows:
+            continue
+        first_row_text = " ".join(c.text for c in table.rows[0].cells).upper()
+        if "DUE DATE" not in first_row_text or "AMOUNT DUE" not in first_row_text:
+            continue
+
+        tbl = table._element
+
+        # Ensure tblPr exists as the first child of <w:tbl>.
+        tblPr = tbl.find(qn("w:tblPr"))
+        if tblPr is None:
+            tblPr = OxmlElement("w:tblPr")
+            tbl.insert(0, tblPr)
+
+        # Fixed layout — widths are honored verbatim instead of auto-sizing.
+        tbl_layout = tblPr.find(qn("w:tblLayout"))
+        if tbl_layout is None:
+            tbl_layout = OxmlElement("w:tblLayout")
+            tblPr.append(tbl_layout)
+        tbl_layout.set(qn("w:type"), "fixed")
+
+        # Total table width = body width (dxa = twips).
+        tblW = tblPr.find(qn("w:tblW"))
+        if tblW is None:
+            tblW = OxmlElement("w:tblW")
+            tblPr.append(tblW)
+        tblW.set(qn("w:w"), str(RENT_TABLE_BODY_WIDTH_TWIPS))
+        tblW.set(qn("w:type"), "dxa")
+
+        # Replace tblGrid with two equal-width columns.
+        old_grid = tbl.find(qn("w:tblGrid"))
+        if old_grid is not None:
+            tbl.remove(old_grid)
+        new_grid = OxmlElement("w:tblGrid")
+        for _ in range(2):
+            gridCol = OxmlElement("w:gridCol")
+            gridCol.set(qn("w:w"), str(RENT_TABLE_COL_WIDTH_TWIPS))
+            new_grid.append(gridCol)
+        tblPr.addnext(new_grid)
+
+        # Set tcW on every cell so per-cell widths line up with the grid.
+        for row in table.rows:
+            for cell in row.cells:
+                tc = cell._tc
+                tcPr = tc.find(qn("w:tcPr"))
+                if tcPr is None:
+                    tcPr = OxmlElement("w:tcPr")
+                    tc.insert(0, tcPr)
+                tcW = tcPr.find(qn("w:tcW"))
+                if tcW is None:
+                    tcW = OxmlElement("w:tcW")
+                    tcPr.append(tcW)
+                tcW.set(qn("w:w"), str(RENT_TABLE_COL_WIDTH_TWIPS))
+                tcW.set(qn("w:type"), "dxa")
+        return
 
 
 def _force_amounts_table_cells_left(doc) -> None:
@@ -1126,10 +1208,11 @@ def _force_amounts_table_cells_left(doc) -> None:
 def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     """Move 'TOTAL AMOUNT DUE: $X' into the rent table as a final 2-cell row.
 
-    Result: the dollar value occupies the same column as the AMOUNT DUE data
-    above it (column-aligned, like a spreadsheet total row). The 'TOTAL AMOUNT
-    DUE:' label sits in the left cell, right-justified within that cell so the
-    label nudges toward the divider instead of floating at body-left.
+    Layout per AM-approved reference: 'TOTAL AMOUNT DUE:' sits LEFT-aligned in
+    column 1 (under DUE DATE column), and the dollar value sits LEFT-aligned in
+    column 2 (under AMOUNT DUE column). Both cells get a small w:before spacing
+    (120 twips) to put visible vertical breathing room between the last
+    itemized row and the total row, like a spreadsheet total.
 
     Returns True if the table-row swap happened, False if the rent table or
     the standalone TOTAL paragraph couldn't be located.
@@ -1157,7 +1240,8 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     run = label_para.add_run("TOTAL AMOUNT DUE:")
     run.bold = True
     run.font.size = Pt(11.5)
-    label_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    label_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _set_paragraph_spacing_explicit(label_para, before=120, after=0)
 
     value_para = value_cell.paragraphs[0]
     for r in list(value_para.runs):
@@ -1166,6 +1250,7 @@ def _add_total_row_to_amounts_table(doc, total_amount_due: str) -> bool:
     vrun.bold = True
     vrun.font.size = Pt(11.5)
     value_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _set_paragraph_spacing_explicit(value_para, before=120, after=0)
 
     body = doc.element.body
     for para in list(doc.paragraphs):
@@ -1454,6 +1539,17 @@ async def generate_notice(req: GenerateNoticeRequest):
     # street field so {{PROPERTY_ADDRESS_STREET}} doesn't duplicate city/state/zip.
     req.property_address_street = _strip_city_state_zip_trailer(req.property_address_street)
     req.county = sanitize(req.county)
+    # Defense-in-depth against the n8n lookupCounty/deriveCounty JS functions
+    # leaking the bare city-matched value (e.g. "Santa Cruz") instead of the
+    # full county name ("Santa Cruz County"). The template renders this as
+    # "COUNTY OF {{COUNTY}}", so the suffix matters. Skip if value is the
+    # BLANK_LINE sanitization sentinel or already ends in "County".
+    if (
+        req.county
+        and req.county != BLANK_LINE
+        and not req.county.strip().lower().endswith("county")
+    ):
+        req.county = f"{req.county.strip()} County"
     req.total_amount_due = sanitize(req.total_amount_due)
     req.service_date = sanitize(req.service_date)
     req.payment_address = sanitize(req.payment_address)
@@ -1630,9 +1726,16 @@ async def generate_notice(req: GenerateNoticeRequest):
 
     # --- Step 3e2: Add the TOTAL AMOUNT DUE row to the rent table ---
     # Run AFTER _force_left_align_doc so the row's per-cell alignments
-    # (label = RIGHT, value = LEFT) survive the global pass.
+    # (both LEFT in their respective columns) survive the global pass.
     moved_total = _add_total_row_to_amounts_table(doc, req.total_amount_due)
     logger.info(f"generate-notice: total-row inlined into table = {moved_total}")
+
+    # --- Step 3e3: Force rent-table column widths to span body width ---
+    # Run AFTER the TOTAL row is added so the new row's two cells also get
+    # the body-width column sizing. Sets fixed layout + tblGrid + tcW so the
+    # AMOUNT DUE column anchors at the right side of the page (per AM's
+    # reference image) instead of drifting toward the middle.
+    _set_rent_table_column_widths(doc)
 
     # --- Step 3f: Force California heading onto page 2 for high-row notices ---
     # Below the threshold, the soft compaction already keeps the doc to 2
