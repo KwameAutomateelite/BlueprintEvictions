@@ -1517,6 +1517,11 @@ def _replace_housing_provider_block_with_paragraphs(
             sig_idx = idx
             break
 
+    # Give the signer physical writing space above the signature line —
+    # 3 line heights at 11pt body text (240 twips/line × 3 = 720 twips).
+    if sig_para is not None:
+        _set_paragraph_spacing_explicit(sig_para, before=720)
+
     # Anchor to the tab-stop position where "(Original signed by agent/owner)"
     # actually renders (the paragraph's w:left=473 only positions "Date:" — the
     # parenthetical lands on the 2nd tab stop). Read tabs dynamically so the
@@ -1588,7 +1593,7 @@ def _replace_housing_provider_block_with_paragraphs(
             if sp0 is None:
                 sp0 = OxmlElement("w:spacing")
                 pPr0.append(sp0)
-            sp0.set(qn("w:before"), "240")
+            sp0.set(qn("w:before"), "720")
             sp0.set(qn("w:after"), "0")
             for q in found[1:]:
                 pPr_q = q._p.find(qn("w:pPr"))
