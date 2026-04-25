@@ -1518,7 +1518,7 @@ def _compact_empty_paragraphs_before_heading(doc, heading_substring: str) -> int
 
 
 def _replace_housing_provider_block_with_paragraphs(
-    doc, addr_line1: str, city_state_zip: str, phone: str
+    doc, addr_line1: str, city_state_zip: str, phone: str, row_count: int = 1
 ) -> None:
     """Replace the Housing Provider's / Landlord's Address block with 4 plain paragraphs
     (label / street / city-state-zip / phone) stacked directly beneath the
@@ -1530,6 +1530,13 @@ def _replace_housing_provider_block_with_paragraphs(
     removed so only one line of gap (w:before=240) remains above the block.
     Internal block lines have w:spacing stripped so the BodyText default
     line-height applies and the four rows stack tight.
+
+    `row_count` is the AMOUNTS_DUE row count. AM's hard constraint: 12-row PRQ
+    notices MUST fit on 2 pages. The original 720-twip (3-line) writing room
+    above sig + above HP added ~1" of fixed padding that pushed California
+    content onto a 3rd page on dense renders. For 5+ rows we tighten both
+    before-spacing values to 240 (1 line) so the body collapses back into 2
+    pages. Short notices (<=4 rows) keep the full 720 breathing room.
     """
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
@@ -1546,9 +1553,12 @@ def _replace_housing_provider_block_with_paragraphs(
             break
 
     # Give the signer physical writing space above the signature line —
-    # 3 line heights at 11pt body text (240 twips/line × 3 = 720 twips).
+    # 3 line heights at 11pt body text (240 twips/line × 3 = 720 twips) on
+    # short notices, but compress to 1 line (240) on dense renders so 12-row
+    # notices still fit on 2 pages.
+    sig_hp_before = 240 if row_count >= 5 else 720
     if sig_para is not None:
-        _set_paragraph_spacing_explicit(sig_para, before=720)
+        _set_paragraph_spacing_explicit(sig_para, before=sig_hp_before)
 
     # Anchor to the tab-stop position where "(Original signed by agent/owner)"
     # actually renders (the paragraph's w:left=473 only positions "Date:" — the
@@ -1621,7 +1631,7 @@ def _replace_housing_provider_block_with_paragraphs(
             if sp0 is None:
                 sp0 = OxmlElement("w:spacing")
                 pPr0.append(sp0)
-            sp0.set(qn("w:before"), "720")
+            sp0.set(qn("w:before"), str(sig_hp_before))
             sp0.set(qn("w:after"), "0")
             for q in found[1:]:
                 pPr_q = q._p.find(qn("w:pPr"))
@@ -1780,7 +1790,11 @@ async def generate_notice(req: GenerateNoticeRequest):
         doc, req.landlord_name, landlord_addr_line1, landlord_city_state_zip
     )
     _replace_housing_provider_block_with_paragraphs(
-        doc, landlord_addr_line1, landlord_city_state_zip, req.landlord_phone
+        doc,
+        landlord_addr_line1,
+        landlord_city_state_zip,
+        req.landlord_phone,
+        row_count=len(req.amounts_due),
     )
 
     # --- Step 2c: Pull California notices up to avoid orphan page 2 ---
@@ -1870,6 +1884,17 @@ async def generate_notice(req: GenerateNoticeRequest):
     # alignment (DUE DATE LEFT, AMOUNT DUE RIGHT) is re-applied AFTER this
     # pass via _align_rent_table_columns so it survives.
     _force_left_align_doc(doc)
+
+    # The notice title ({{NOTICE_HEADER}}, e.g. "THREE (3) DAY NOTICE TO PAY
+    # RENT OR QUIT") is the one body paragraph that must stay center-aligned.
+    # The global LEFT pass above flattens it; restore center jc here. Match by
+    # rendered text so this works for any computed or caller-supplied header.
+    if notice_header:
+        title_text = notice_header.strip()
+        for paragraph in doc.paragraphs:
+            if paragraph.text.strip() == title_text:
+                _set_paragraph_alignment(paragraph, "center")
+                break
 
     # --- Step 3e2: Add the TOTAL AMOUNT DUE row to the rent table ---
     moved_total = _add_total_row_to_amounts_table(doc, req.total_amount_due)
