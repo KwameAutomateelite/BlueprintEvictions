@@ -1616,25 +1616,21 @@ def _compact_for_dense_table(doc) -> int:
 
 
 def _replace_housing_provider_block_with_paragraphs(
-    doc, addr_line1: str, city_state_zip: str, phone: str, row_count: int = 1
+    doc, addr_line1: str, city_state_zip: str, phone: str
 ) -> None:
     """Replace the Housing Provider's / Landlord's Address block with 4 plain paragraphs
     (label / street / city-state-zip / phone) stacked directly beneath the
     "Date: (Original signed by agent/owner)" signature line.
 
     Reads the signature paragraph's literal w:left and applies the same indent
-    to the block so both share the same paragraph indent. Empty paragraphs
-    sitting between the signature line and the original block label are
-    removed so only one line of gap (w:before=240) remains above the block.
-    Internal block lines have w:spacing stripped so the BodyText default
-    line-height applies and the four rows stack tight.
+    to the block so both share the same paragraph indent. Internal block lines
+    have w:spacing stripped so the BodyText default line-height applies and
+    the four rows stack tight.
 
-    `row_count` is the AMOUNTS_DUE row count. AM's hard constraint: 12-row PRQ
-    notices MUST fit on 2 pages. The original 720-twip (3-line) writing room
-    above sig + above HP added ~1" of fixed padding that pushed California
-    content onto a 3rd page on dense renders. For 5+ rows we tighten both
-    before-spacing values to 240 (1 line) so the body collapses back into 2
-    pages. Short notices (<=4 rows) keep the full 720 breathing room.
+    AM hard requirement: 720-twip (3-line) gap above the signature line AND
+    above the Housing Provider block, regardless of row count. The 12-row
+    2-page fit is reclaimed by `_compact_for_dense_table`, never by
+    collapsing the signer's writing space.
     """
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
@@ -1651,10 +1647,11 @@ def _replace_housing_provider_block_with_paragraphs(
             break
 
     # Give the signer physical writing space above the signature line —
-    # 3 line heights at 11pt body text (240 twips/line × 3 = 720 twips) on
-    # short notices, but compress to 1 line (240) on dense renders so 12-row
-    # notices still fit on 2 pages.
-    sig_hp_before = 240 if row_count >= 5 else 720
+    # 3 line heights at 11pt body text (240 twips/line × 3 = 720 twips).
+    # Non-negotiable: AM has confirmed the 3-line gap is required regardless
+    # of row count. 2-page fit on dense renders is achieved via California-
+    # section paragraph compression + dense-table compaction, not here.
+    sig_hp_before = 720
     if sig_para is not None:
         _set_paragraph_spacing_explicit(sig_para, before=sig_hp_before)
 
@@ -1888,11 +1885,7 @@ async def generate_notice(req: GenerateNoticeRequest):
         doc, req.landlord_name, landlord_addr_line1, landlord_city_state_zip
     )
     _replace_housing_provider_block_with_paragraphs(
-        doc,
-        landlord_addr_line1,
-        landlord_city_state_zip,
-        req.landlord_phone,
-        row_count=len(req.amounts_due),
+        doc, landlord_addr_line1, landlord_city_state_zip, req.landlord_phone
     )
 
     # --- Step 2b2: Dense-table compression (5+ rows) ---
