@@ -21,7 +21,8 @@ from dropbox_sign import ApiClient, ApiException, Configuration, apis, models
 print("STARTUP: importing fastapi...", flush=True)
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pydantic.aliases import AliasChoices
 
 print("STARTUP: all imports OK", flush=True)
 
@@ -95,13 +96,21 @@ class GenerateNoticeRequest(BaseModel):
     property_address: str = ""
     property_address_street: str = ""  # Optional: if provided, used directly instead of splitting property_address
     property_address_city: str = ""    # Optional: if provided, used directly instead of splitting property_address
-    county: str
+    # Maddy upstream sends apt/unit as separate fields; concatenate onto the
+    # street line so '123 Main St, Apt 3B' renders together instead of dropping.
+    apt: str = ""
+    unit: str = ""
+    # AM's 2026-05-11 live test surfaced COUNTY rendering blank. Defensively
+    # accept the alternate field name 'county_name' (some Maddy code paths emit
+    # that) without forcing upstream changes.
+    county: str = Field(validation_alias=AliasChoices("county", "county_name"))
     amounts_due: List[AmountDue]
     total_amount_due: str
     service_date: str = ""
     payment_address: str = ""
     landlord_name: str
     landlord_phone: str = ""
+    landlord_email: str = ""
     landlord_address: str = ""
     landlord_city: str = ""
     landlord_state: str = ""
@@ -1035,10 +1044,45 @@ def _force_left_align_doc(doc) -> None:
                     _set_paragraph_alignment(paragraph, "left")
 
 
+# Sentinel substituted in place of NOT_FOUND / N/A / empty caller values so the
+# rendered notice shows a blank fill-in line instead of leaking the literal
+# 'NOT_FOUND'. Promoted to module scope so helpers outside the handler
+# (_insert_landlord_contact_block, _replace_housing_provider_block_with_paragraphs)
+# can skip the sentinel without duplicating the string literal.
+BLANK_LINE = "_______________"
+
+
 _ALL_OTHER_OCCUPANTS_RE = re.compile(
     r"\b(?:and\s+)?all\s+other\s+occupants\b",
     re.IGNORECASE,
 )
+
+
+def title_case(text: Optional[str]) -> str:
+    """Title-case proper-noun fields without mangling intentional caps.
+
+    Airtable stores many names in ALL CAPS but the notice belongs to 'Tao Dang',
+    not 'TAO DANG'. Apply Python's str.title() only when input has no intentional
+    internal capitalization — that way 'McDonald' and 'Anne-Michelle' pass
+    through untouched while 'TAO DANG' and 'j.r. smith' get normalized.
+    """
+    if not text:
+        return ""
+    s = str(text).strip()
+    if not s:
+        return ""
+    has_upper = any(c.isupper() for c in s)
+    has_lower = any(c.islower() for c in s)
+    if has_upper and has_lower:
+        return s
+    return s.title()
+
+
+def _tc_field(value: str) -> str:
+    """title_case() except the BLANK_LINE sentinel passes through unchanged."""
+    if not value or value == BLANK_LINE:
+        return value
+    return title_case(value)
 
 
 def _normalize_all_other_occupants(text: str) -> str:
@@ -1437,6 +1481,54 @@ def _find_body_ref_paragraph(doc):
     return None
 
 
+def _insert_landlord_contact_block(
+    doc,
+    landlord_name: str,
+    landlord_phone: str,
+    landlord_email: str,
+) -> bool:
+    """Insert a landlord-contact block (name / Phone / Email) between the tenant
+    address block and the notice body ("PLEASE TAKE NOTICE...").
+
+    The page-1 'delivered to:' block holds the PAYMENT address in the middle
+    of the body; the actual landlord contact info (who to call/email about the
+    notice) belongs visually grouped with the tenant address at the top.
+    The template doesn't ship a placeholder for this, so we insert fresh
+    paragraphs before "PLEASE TAKE NOTICE" cloning the body paragraph's
+    formatting and matching the tenant-address indent (TENANT_BLOCK_LEFT_TWIPS).
+
+    Returns True if a block was inserted.
+    """
+    lines = []
+    if landlord_name and landlord_name != BLANK_LINE:
+        lines.append(landlord_name)
+    if landlord_phone and landlord_phone != BLANK_LINE:
+        lines.append(f"Phone: {landlord_phone}")
+    if landlord_email:
+        lines.append(f"Email: {landlord_email}")
+    if not lines:
+        return False
+
+    target_para = None
+    for p in doc.paragraphs:
+        if p.text.strip().upper().startswith("PLEASE TAKE NOTICE"):
+            target_para = p
+            break
+    if target_para is None:
+        logger.info("landlord-contact-block: skipping (PLEASE TAKE NOTICE not found)")
+        return False
+
+    ref_para = _find_body_ref_paragraph(doc) or target_para
+    _insert_paragraphs_before(
+        target_para._element,
+        lines,
+        ref_para,
+        zero_spacing=True,
+        left_indent=TENANT_BLOCK_LEFT_TWIPS,
+    )
+    return True
+
+
 def _replace_owner_block_with_paragraphs(
     doc, owner_name: str, addr_line1: str, city_state_zip: str
 ) -> None:
@@ -1652,11 +1744,15 @@ def _compact_for_dense_table(doc) -> int:
 
 
 def _replace_housing_provider_block_with_paragraphs(
-    doc, addr_line1: str, city_state_zip: str, phone: str
+    doc, addr_line1: str, city_state_zip: str, phone: str, signer_name: str = ""
 ) -> None:
-    """Replace the Housing Provider's / Landlord's Address block with 4 plain paragraphs
-    (label / street / city-state-zip / phone) stacked directly beneath the
-    "Date: (Original signed by agent/owner)" signature line.
+    """Replace the Housing Provider's / Landlord's Address block with up to 5 plain
+    paragraphs (label / street / city-state-zip / signer-name / phone) stacked
+    directly beneath the "Date: (Original signed by agent/owner)" signature line.
+
+    Per standard CA eviction notice format the signer name (landlord/agent)
+    renders DIRECTLY UNDER the address. When signer_name is blank/sentinel,
+    the line is omitted so the block falls back to the four-line layout.
 
     Reads the signature paragraph's literal w:left and applies the same indent
     to the block so both share the same paragraph indent. Internal block lines
@@ -1738,7 +1834,10 @@ def _replace_housing_provider_block_with_paragraphs(
                     body.remove(paras[k]._element)
 
         ref_para = _find_body_ref_paragraph(doc) or para
-        lines = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
+        lines = [label, addr_line1, city_state_zip]
+        if signer_name and signer_name != BLANK_LINE:
+            lines.append(signer_name)
+        lines.append(f"Phone: {phone}")
         _insert_paragraphs_before(
             to_remove[0],
             lines,
@@ -1749,14 +1848,14 @@ def _replace_housing_provider_block_with_paragraphs(
         for el in to_remove:
             body.remove(el)
 
-        target_texts = [label, addr_line1, city_state_zip, f"Phone: {phone}"]
+        target_texts = list(lines)
         found = []
         for p in doc.paragraphs:
-            if len(found) >= 4:
+            if len(found) >= len(target_texts):
                 break
             if p.text.strip() == target_texts[len(found)]:
                 found.append(p)
-        if len(found) == 4:
+        if len(found) == len(target_texts):
             pPr0 = _ensure_pPr(found[0])
             sp0 = pPr0.find(qn("w:spacing"))
             if sp0 is None:
@@ -1797,7 +1896,7 @@ async def generate_notice(req: GenerateNoticeRequest):
         raise HTTPException(status_code=500, detail=f"Template not found: {template_name}")
 
     # --- Sanitize NOT_FOUND values ---
-    BLANK_LINE = "_______________"
+    # BLANK_LINE sentinel lives at module scope (above) so helpers can reach it.
     def sanitize(val: str) -> str:
         """Replace NOT_FOUND/empty/None values with a blank line for the document."""
         if not val:
@@ -1809,6 +1908,8 @@ async def generate_notice(req: GenerateNoticeRequest):
 
     # Sanitize all request fields before use
     req.tenant_names = sanitize(req.tenant_names)
+    # Normalize all-caps/all-lower proper nouns before render: 'TAO DANG' → 'Tao Dang'.
+    req.tenant_names = title_case(req.tenant_names)
     # Defense-in-depth against upstream LLM casing drift: enforce
     # "and All Other Occupants" (Title Case) regardless of how the caller
     # punctuated/cased the suffix.
@@ -1819,7 +1920,17 @@ async def generate_notice(req: GenerateNoticeRequest):
     # Defense-in-depth: strip any '<City> CA <ZIP>' trailer that leaked into the
     # street field so {{PROPERTY_ADDRESS_STREET}} doesn't duplicate city/state/zip.
     req.property_address_street = _strip_city_state_zip_trailer(req.property_address_street)
+    # Only normalize the explicit street/city sub-fields here. The combined
+    # property_address blob ('123 MAIN ST, San Jose, CA 94102') is mixed-case
+    # in aggregate; title_case would preserve it verbatim, so we instead apply
+    # it to the split parts below.
+    req.property_address_street = _tc_field(req.property_address_street)
+    req.apt = req.apt.strip() if req.apt else ""
+    req.unit = req.unit.strip() if req.unit else ""
     req.county = sanitize(req.county)
+    # Normalize county casing — 'santa clara' → 'Santa Clara' — before the
+    # ' County' suffix is appended below.
+    req.county = _tc_field(req.county)
     # Defense-in-depth against the n8n lookupCounty/deriveCounty JS functions
     # leaking the bare city-matched value (e.g. "Santa Cruz") instead of the
     # full county name ("Santa Cruz County"). The template renders this as
@@ -1834,11 +1945,20 @@ async def generate_notice(req: GenerateNoticeRequest):
     req.total_amount_due = sanitize(req.total_amount_due)
     req.service_date = sanitize(req.service_date)
     req.payment_address = sanitize(req.payment_address)
-    req.landlord_name = sanitize(req.landlord_name)
+    req.landlord_name = _tc_field(sanitize(req.landlord_name))
     req.landlord_phone = sanitize(req.landlord_phone)
-    req.landlord_address = sanitize(req.landlord_address)
-    req.landlord_city = req.landlord_city.strip() if req.landlord_city else ""
-    req.landlord_state = req.landlord_state.strip() if req.landlord_state else ""
+    # Filter NOT_FOUND/N/A sentinels — re-use sanitize() then collapse the
+    # BLANK_LINE sentinel back to "" so callers skip the Email: line entirely
+    # when no email is on file.
+    req.landlord_email = sanitize(req.landlord_email)
+    if req.landlord_email == BLANK_LINE:
+        req.landlord_email = ""
+    req.landlord_address = _tc_field(sanitize(req.landlord_address))
+    req.landlord_city = title_case(req.landlord_city) if req.landlord_city else ""
+    _state = req.landlord_state.strip() if req.landlord_state else ""
+    # Upper-case only 2-letter state codes ('ca' → 'CA') so a full-name
+    # 'California' stays as written instead of becoming 'CALIFORNIA'.
+    req.landlord_state = _state.upper() if (len(_state) == 2 and _state.isalpha()) else _state
     req.landlord_zip = req.landlord_zip.strip() if req.landlord_zip else ""
     req.notice_date = sanitize(req.notice_date)
     for a in req.amounts_due:
@@ -1858,6 +1978,36 @@ async def generate_notice(req: GenerateNoticeRequest):
         else:
             street = req.property_address
             city_state_zip = ""
+
+    # Title-case the split pieces. Doing this AFTER the split avoids the
+    # "mixed-case full blob preserves as-is" pitfall — '123 MAIN ST' becomes
+    # '123 Main St', and 'San Jose, CA 94102' is preserved (already proper).
+    street = _tc_field(street)
+    city_state_zip = _tc_field(city_state_zip)
+
+    # Apt/unit must render on the SAME line as the street, comma-separated —
+    # '123 Main St, Apt 3B' — not orphaned on a second line. Upstream sends
+    # apt + unit as separate Airtable fields; stitch them onto the street so
+    # the template's {{PROPERTY_ADDRESS_STREET}} placeholder renders one line.
+    _UNIT_LABEL_PREFIXES = ("apt", "apartment", "unit", "suite", "ste", "#")
+
+    def _labeled_unit(value: str, default_label: str) -> str:
+        """Return value as-is if it already starts with a unit label
+        (Apt / Unit / Suite / Ste / #), otherwise prefix with default_label."""
+        v = value.strip()
+        if not v:
+            return ""
+        if v.lower().startswith(_UNIT_LABEL_PREFIXES):
+            return v
+        return f"{default_label} {v}"
+
+    apt_unit_parts = []
+    if req.apt:
+        apt_unit_parts.append(_labeled_unit(req.apt, "Apt"))
+    if req.unit:
+        apt_unit_parts.append(_labeled_unit(req.unit, "Unit"))
+    if apt_unit_parts and street and street != BLANK_LINE:
+        street = f"{street}, " + ", ".join(apt_unit_parts)
 
     # Build landlord address block.
     # Prefer explicit city/state/zip fields (formatted as "City, ST 12345");
@@ -1921,7 +2071,11 @@ async def generate_notice(req: GenerateNoticeRequest):
         doc, req.landlord_name, landlord_addr_line1, landlord_city_state_zip
     )
     _replace_housing_provider_block_with_paragraphs(
-        doc, landlord_addr_line1, landlord_city_state_zip, req.landlord_phone
+        doc,
+        landlord_addr_line1,
+        landlord_city_state_zip,
+        req.landlord_phone,
+        signer_name=req.landlord_name,
     )
 
     # --- Step 2b1: Unconditional final-sectPr cleanup ---
@@ -2024,6 +2178,17 @@ async def generate_notice(req: GenerateNoticeRequest):
     # ("123 Tenant Addy" / "Santa Cruz, CA 98598" / "COUNTY OF Santa Cruz County")
     # and can detect landmark paragraphs by content.
     _fix_tenant_address_block(doc)
+
+    # --- Step 3b1: Landlord contact block ---
+    # Insert a name/phone/email block directly between the tenant address
+    # block and the notice body. Standard CA notice format groups the
+    # landlord's contact info with the tenant address so the recipient sees
+    # who to call/email at a glance, without scanning the body for the
+    # 'delivered to:' payment address.
+    if _insert_landlord_contact_block(
+        doc, req.landlord_name, req.landlord_phone, req.landlord_email
+    ):
+        logger.info("generate-notice: landlord contact block inserted")
 
     # --- Step 3d: Defense-in-depth on "All Other Occupants" casing ---
     # In addition to normalizing req.tenant_names before substitution, also
