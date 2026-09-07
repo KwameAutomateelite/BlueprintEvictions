@@ -506,8 +506,10 @@ def merge_attachment_pdfs(notice_pdf_path: str, attachment_filenames: List[str])
     for filename in attachment_filenames:
         attachment_path = ATTACHMENTS_DIR / filename
         if not attachment_path.exists():
-            logger.warning(f"Attachment not found, skipping: {attachment_path}")
-            continue
+            raise HTTPException(
+                status_code=422,
+                detail=f"Required attachment unavailable: {filename}. No complete package was generated.",
+            )
         attachment_reader = PdfReader(str(attachment_path))
         for page in attachment_reader.pages:
             writer.add_page(page)
