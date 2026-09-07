@@ -1874,6 +1874,36 @@ def _replace_housing_provider_block_with_paragraphs(
         return
 
 
+def _underline_notice_recipients(doc):
+    """Underline recipients on the existing To line, preserving label and run styles."""
+    from copy import deepcopy
+    from docx.text.run import Run
+
+    for paragraph in doc.paragraphs:
+        match = re.match(r"^\s*To:\s*", paragraph.text, re.IGNORECASE)
+        if not match or not paragraph.text[match.end():].strip():
+            continue
+        boundary = match.end()
+        offset = 0
+        for run in list(paragraph.runs):
+            text = run.text
+            end = offset + len(text)
+            if offset >= boundary:
+                run.underline = True
+            elif end <= boundary:
+                run.underline = False
+            else:
+                split = boundary - offset
+                recipient_element = deepcopy(run._r)
+                run._r.addnext(recipient_element)
+                recipient = Run(recipient_element, paragraph)
+                recipient.text = text[split:]
+                recipient.underline = True
+                run.text = text[:split]
+                run.underline = False
+            offset = end
+
+
 @app.post("/generate-notice")
 async def generate_notice(req: GenerateNoticeRequest):
     """Generate a filled .docx eviction notice from template and return it."""
@@ -2198,6 +2228,7 @@ async def generate_notice(req: GenerateNoticeRequest):
     # the LLM injected the phrase elsewhere or the upstream payload bypassed
     # the normalize call.
     _enforce_all_other_occupants_in_doc(doc)
+    _underline_notice_recipients(doc)
 
     # --- Step 3e: Force global left alignment on all body + cell paragraphs ---
     # AM: "Everything left-justified. NOTHING centered." Logo header lives in
