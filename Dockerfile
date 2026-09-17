@@ -17,4 +17,4 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY templates/ templates/
 COPY attachments/ attachments/
-COPY main.py .
+COPY main.py signature_bridge.py signature_callback_service.py signature_integrity.py signature_rollout.py signature_rollover*.py signature-rollout.json ./

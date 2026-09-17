@@ -10,6 +10,7 @@ from typing import List, Optional
 
 print("STARTUP: importing httpx...", flush=True)
 import httpx
+import hashlib
 print("STARTUP: importing python-docx...", flush=True)
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
@@ -67,6 +68,8 @@ NOTICE_TEMPLATES = {
 
 
 class SendSignatureRequest(BaseModel):
+    require_verified_signature: bool = False
+    approved_pdf_sha256: Optional[str] = None
     signer_email: str
     signer_name: str
     document_name: str
@@ -608,6 +611,14 @@ async def send_signature(req: SendSignatureRequest):
         f"Sending signature request: {req.document_name} to {req.signer_email}"
     )
 
+    expected_pdf_hash = getattr(req, 'approved_pdf_sha256', None)
+    if expected_pdf_hash is not None and (
+        len(expected_pdf_hash) != 64
+        or any(c not in '0123456789abcdef' for c in expected_pdf_hash)
+        or not req.file_url
+    ):
+        raise HTTPException(status_code=400, detail='Approved PDF hash and file URL must be valid; nothing sent')
+
     # Get PDF: either download from URL or generate from template
     logger.info(f"DEBUG file_url={req.file_url!r} notice_type={req.notice_type!r}")
     logger.info(f"DEBUG fields keys={list(req.fields.keys())}")
@@ -637,6 +648,15 @@ async def send_signature(req: SendSignatureRequest):
         except OSError:
             pass
 
+    if expected_pdf_hash is not None:
+        approved_bytes = Path(file_path).read_bytes()
+        if not approved_bytes.startswith(b'%PDF-') or hashlib.sha256(approved_bytes).hexdigest() != expected_pdf_hash:
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
+            raise HTTPException(status_code=409, detail='PDF does not match the approved version; nothing sent')
+
     # Merge attachment PDFs if required
     original_file_path = file_path
     if req.attachments_required:
@@ -649,6 +669,79 @@ async def send_signature(req: SendSignatureRequest):
             except OSError:
                 pass
         logger.info(f"Final merged PDF: {file_path} size={os.path.getsize(file_path)}")
+
+    approval_context = None
+    approval_url = os.environ.get("SIGNATURE_APPROVAL_BRIDGE_URL", "")
+    from signature_rollout import load_rollout
+    try:
+        rollout = load_rollout()
+    except (ValueError, OSError):
+        raise HTTPException(status_code=503, detail="Signing rollout configuration is invalid")
+    in_verified_scope = rollout.includes(req.record_id)
+    if req.require_verified_signature and not in_verified_scope:
+        raise HTTPException(status_code=409, detail="Verified signing profile does not include this case; nothing sent")
+    signature_bridge_keys = ("SIGNATURE_APPROVAL_BRIDGE_URL", "SIGNATURE_STORAGE_BRIDGE_URL", "SIGNATURE_STORAGE_BRIDGE_SECRET", "SIGNATURE_SEND_CLAIM_URL")
+    bridge_configured = [bool(os.environ.get(key)) for key in signature_bridge_keys]
+    if in_verified_scope and any(bridge_configured) and not all(bridge_configured):
+        raise HTTPException(status_code=503, detail="Signature integration is partially configured; nothing sent")
+    if req.require_verified_signature and not all(bridge_configured):
+        raise HTTPException(status_code=503, detail="Verified signing bridges are not configured; nothing sent")
+    if approval_url and in_verified_scope:
+        if not os.environ.get("SIGNATURE_STORAGE_BRIDGE_SECRET"):
+            raise HTTPException(status_code=503, detail="Signature approval storage is not configured")
+        async with httpx.AsyncClient(timeout=30, headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"}) as client:
+            case_response = await client.get(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}/{req.record_id}")
+            case_response.raise_for_status()
+            case = case_response.json()
+        fields = case.get("fields") or {}
+        if case.get("id") != req.record_id or not fields.get("Case Folder ID") or not fields.get("Status"):
+            raise HTTPException(status_code=409, detail="Case folder/status could not be verified before signing")
+        if fields["Status"] not in {"Sent for Signature", "To Owner for Review (N)"}:
+            raise HTTPException(status_code=409, detail="Case is not awaiting owner signature; nothing sent")
+        approval_context = {"record_id": req.record_id, "folder_id": fields["Case Folder ID"], "expected_status": fields["Status"], "approved_document_sha256": hashlib.sha256(Path(file_path).read_bytes()).hexdigest()}
+
+    if approval_context is not None:
+        if not rollout.accepts_signer(req.signer_email, fields):
+            raise HTTPException(status_code=403, detail="Signer does not match the configured signing scope or current case")
+        claim_url = os.environ.get("SIGNATURE_SEND_CLAIM_URL", "")
+        if not claim_url or not os.environ.get("SIGNATURE_STORAGE_BRIDGE_URL"):
+            raise HTTPException(status_code=503, detail="Signature storage/claim configuration incomplete; nothing sent")
+        from signature_bridge import claim_signature_send, SignatureClaimExists
+        try:
+            async with httpx.AsyncClient(timeout=60) as claim_client:
+                claim = await claim_signature_send(claim_client, claim_url, os.environ["SIGNATURE_STORAGE_BRIDGE_SECRET"], req.record_id, approval_context["approved_document_sha256"], req.signer_email)
+        except SignatureClaimExists:
+            if os.environ.get('SIGNATURE_ROLLOVER_TEST_ENABLED') != '1' or not rollout.test_mode or not getattr(req, 'approved_pdf_sha256', None):
+                raise HTTPException(status_code=409, detail='Existing signing claim requires reconciliation; nothing sent')
+            from signature_rollover_service import claim_completed_cycle
+            try:
+                async with httpx.AsyncClient(timeout=180) as rollover_client:
+                    claim = await claim_completed_cycle(
+                        rollover_client,
+                        evidence_url=os.environ.get('SIGNATURE_ROLLOVER_EVIDENCE_URL', ''),
+                        storage_url=os.environ.get('SIGNATURE_ROLLOVER_STORAGE_URL', ''),
+                        secret=os.environ['SIGNATURE_STORAGE_BRIDGE_SECRET'],
+                        provider_key=os.environ.get('DROPBOX_SIGN_API_KEY', ''),
+                        request={'record_id':req.record_id, 'approved_document_sha256':approval_context['approved_document_sha256'], 'test_mode':True},
+                        signer_email=req.signer_email,
+                        expected_folder=approval_context['folder_id'],
+                        expected_status=approval_context['expected_status'])
+            except (httpx.HTTPError, ValueError):
+                raise HTTPException(status_code=409, detail='Prior signing cycle could not be safely preserved. Nothing sent by this attempt; reconcile before retrying.')
+        except (httpx.HTTPError, ValueError):
+            raise HTTPException(status_code=409, detail="Signing request already attempted or claim unverified. Nothing sent by this attempt; reconcile before retrying.")
+        if claim["folder_id"] != approval_context["folder_id"] or claim["expected_status"] != approval_context["expected_status"]:
+            raise HTTPException(status_code=409, detail="Case changed before signing; nothing sent")
+        if claim.get('repeat_cycle_reservation'):
+            async with httpx.AsyncClient(timeout=30, headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"}) as case_client:
+                latest_response = await case_client.get(f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_ID}/{req.record_id}")
+                latest_response.raise_for_status()
+                latest = latest_response.json()
+            if (latest.get('id') != req.record_id
+                    or latest.get('fields', {}).get('Case Folder ID') != approval_context['folder_id']
+                    or latest.get('fields', {}).get('Status') != approval_context['expected_status']
+                    or not rollout.accepts_signer(req.signer_email, latest.get('fields', {}))):
+                raise HTTPException(status_code=409, detail='Case changed during repeat-notice preparation; nothing sent')
 
     try:
         with ApiClient(configuration) as api_client:
@@ -678,13 +771,22 @@ async def send_signature(req: SendSignatureRequest):
                 ),
                 signers=[signer],
                 files=[open(file_path, "rb")],
-                metadata={"record_id": req.record_id},
+                metadata={"record_id": req.record_id, "approved_document_sha256": hashlib.sha256(Path(file_path).read_bytes()).hexdigest()},
                 signing_options=signing_options,
-                test_mode=os.environ.get("DROPBOX_SIGN_TEST_MODE", "0") == "1",
+                test_mode=(approval_context is not None and rollout.test_mode) or os.environ.get("DROPBOX_SIGN_TEST_MODE", "0") == "1",
             )
 
             result = signature_request_api.signature_request_send(data)
             sig_request = result.signature_request
+
+            if approval_context is not None:
+                from signature_bridge import record_signature_approval
+                approval_context["signature_request_id"] = sig_request.signature_request_id
+                try:
+                    async with httpx.AsyncClient(timeout=60) as approval_client:
+                        await record_signature_approval(approval_client, approval_url, os.environ["SIGNATURE_STORAGE_BRIDGE_SECRET"], approval_context)
+                except (httpx.HTTPError, ValueError):
+                    raise HTTPException(status_code=502, detail={"message": "Signature request already sent; approval storage needs reconciliation. Do not resend.", "signature_request_id": sig_request.signature_request_id})
 
             logger.info(
                 f"Signature request created: {sig_request.signature_request_id}"
@@ -728,6 +830,34 @@ async def signature_callback(request: Request):
     payload = json.loads(json_str)
     event = payload.get("event", {})
     event_type = event.get("event_type")
+    # Controlled rollout: existing non-test case handling is preserved.
+    bridge_url = os.environ.get("SIGNATURE_STORAGE_BRIDGE_URL", "")
+    from signature_rollout import load_rollout
+    try:
+        rollout = load_rollout()
+    except (ValueError, OSError):
+        raise HTTPException(status_code=503, detail="Signing rollout configuration is invalid")
+    callback_record = (payload.get("signature_request", {}).get("metadata") or {}).get("record_id")
+    if bridge_url and rollout.includes(callback_record):
+        from signature_callback_service import process_signature_callback
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as provider_client, httpx.AsyncClient(timeout=60) as storage_client, httpx.AsyncClient(timeout=30, headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"}) as airtable_client:
+            try:
+                await process_signature_callback(
+                    payload, provider=provider_client, airtable=airtable_client,
+                    storage_http=storage_client, api_key=DROPBOX_SIGN_API_KEY,
+                    bridge_url=bridge_url,
+                    bridge_secret=os.environ.get("SIGNATURE_STORAGE_BRIDGE_SECRET", ""),
+                    base_id=AIRTABLE_BASE_ID, table_id=AIRTABLE_TABLE_ID,
+                    allowed_records={callback_record},
+                )
+            except ValueError as exc:
+                logger.warning("Controlled signature callback held: %s", exc)
+                raise HTTPException(status_code=409, detail="Signature completion needs verification")
+            except httpx.HTTPError:
+                logger.warning("Controlled signature callback dependency failed")
+                raise HTTPException(status_code=503, detail="Signature completion dependency unavailable")
+        return PlainTextResponse("Hello API Event Received")
+
     event_time = event.get("event_time")
 
     logger.info(f"Dropbox Sign callback: event_type={event_type} time={event_time}")
