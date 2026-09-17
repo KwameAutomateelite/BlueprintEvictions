@@ -1,0 +1,7 @@
+{
+  "profile": "kwame-test",
+  "allowed_case_ids": ["recxLwYEXtb2ZrWen", "recsrE9MTyS3L255x", "recmUWykPoVce3Qwc", "recanX514zrPbXPAi"],
+  "allowed_signers": ["kwame@automateelite.com", "kwame@servicebro.ai"],
+  "signer_fields": ["Landlord's Preferred Email", "Email"],
+  "test_mode": true
+}
