@@ -70,6 +70,7 @@ NOTICE_TEMPLATES = {
 class SendSignatureRequest(BaseModel):
     require_verified_signature: bool = False
     approved_pdf_sha256: Optional[str] = None
+    authorized_test_cycle: Optional[str] = None
     signer_email: str
     signer_name: str
     document_name: str
@@ -722,7 +723,7 @@ async def send_signature(req: SendSignatureRequest):
                         storage_url=os.environ.get('SIGNATURE_ROLLOVER_STORAGE_URL', ''),
                         secret=os.environ['SIGNATURE_STORAGE_BRIDGE_SECRET'],
                         provider_key=os.environ.get('DROPBOX_SIGN_API_KEY', ''),
-                        request={'record_id':req.record_id, 'approved_document_sha256':approval_context['approved_document_sha256'], 'test_mode':True},
+                        request={'record_id':req.record_id, 'approved_document_sha256':approval_context['approved_document_sha256'], 'test_mode':True, 'authorized_test_cycle':getattr(req, 'authorized_test_cycle', None)},
                         signer_email=req.signer_email,
                         expected_folder=approval_context['folder_id'],
                         expected_status=approval_context['expected_status'])
