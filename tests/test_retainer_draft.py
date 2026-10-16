@@ -45,3 +45,41 @@ class RetainerRouteTests(unittest.TestCase):
             headers={'x-narnia-retainer-secret':'test-only-secret'}
             self.assertEqual(client.post('/test-retainer-draft',json={'test_only':False},headers=headers).status_code,422)
             self.assertEqual(client.post('/test-retainer-draft',json=RetainerDraftTests().plan(),headers=headers).status_code,200)
+
+class GeneralRetainerTests(unittest.TestCase):
+    def plan(self):
+        return {**RetainerDraftTests().plan(), 'test_only': False,
+                'record_id': 'recExampleNotice01', 'eviction_id': 'recExampleEvict001',
+                'case_folder_id': 'example-folder', 'case_name': 'Example Owner v. Example Tenant',
+                'tenant_names': 'Example Tenant', 'property_address': '456 Example St, San Jose, CA 95112',
+                'retainer_price': 3500}
+
+    def test_general_case_and_owner_supplied_fee(self):
+        from retainer_draft import render_retainer_draft
+        result = render_retainer_draft(self.plan())
+        self.assertEqual(result['fields']['TOTAL'], '$3,500.00')
+        self.assertEqual(result['fields']['SHORT CASE NAME'], self.plan()['case_name'])
+        self.assertFalse(result['test_only'])
+        self.assertFalse(result['sent'])
+        self.assertFalse(result['approved'])
+
+    def test_reject_missing_case_unsupported_county_and_invalid_money(self):
+        from retainer_draft import render_retainer_draft
+        for key, value in [('case_folder_id', ''), ('county', 'San Mateo'),
+                           ('retainer_price', 'NaN'), ('retainer_price', -1),
+                           ('retainer_price', '3500.001'), ('conflicting_inputs', ['owner'])]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                render_retainer_draft({**self.plan(), key: value})
+
+    def test_general_route_requires_authentication(self):
+        import os
+        from unittest.mock import patch
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from retainer_routes import router
+        app = FastAPI(); app.include_router(router)
+        with patch.dict(os.environ, {'SIGNATURE_STORAGE_BRIDGE_SECRET': 'test-only-secret'}):
+            client = TestClient(app)
+            self.assertEqual(client.post('/retainer-draft', json=self.plan()).status_code, 401)
+            self.assertEqual(client.post('/retainer-draft', json=self.plan(), headers={
+                'x-narnia-retainer-secret': 'test-only-secret'}).status_code, 200)

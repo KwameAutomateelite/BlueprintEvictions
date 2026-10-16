@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import io
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, TextStringObject, ArrayObject
@@ -29,13 +30,41 @@ def render_test_retainer(plan):
     address = plan.get('property_address', '')
     if case_name != 'Tenant Maddy v. Maddy' or address != '123 Test St, Santa Clara, CA 95050':
         raise ValueError('Synthetic case display fields changed')
+    result = render_retainer_draft(plan)
+    result['filename'] = 'TEST - Maddy retainer draft - 3395.pdf'
+    return result
+
+
+def render_retainer_draft(plan):
+    """Populate an unsigned Santa Clara agreement from an explicit case plan."""
+    if not isinstance(plan, dict):
+        raise ValueError('Expected a case plan')
+    required = ['record_id', 'eviction_id', 'case_folder_id', 'case_name',
+                'property_address', 'tenant_names', 'source_notice_sha256']
+    for key in required:
+        if not isinstance(plan.get(key), str) or not plan[key].strip():
+            raise ValueError('Missing case field: ' + key)
+    if plan.get('missing_inputs') or plan.get('conflicting_inputs'):
+        raise ValueError('Retainer plan unresolved')
+    if plan.get('county') not in ('Santa Clara', 'Santa Clara County'):
+        raise ValueError('No verified retainer template for this county')
+    if plan.get('property_type') not in ('residential', 'commercial'):
+        raise ValueError('Property type required')
+    try:
+        amount = Decimal(str(plan.get('retainer_price', '')))
+        if not amount.is_finite() or amount <= 0 or amount != amount.quantize(Decimal('0.01')):
+            raise ValueError('Invalid retainer amount')
+    except (InvalidOperation, TypeError):
+        raise ValueError('Invalid retainer amount')
+    case_name = plan['case_name'].strip()
+    address = plan['property_address'].strip()
     template = TEMPLATE.read_bytes()
     if hashlib.sha256(template).hexdigest() != TEMPLATE_SHA:
         raise ValueError('Retainer template changed; review required')
     values = {
         'SHORT CASE NAME': case_name, 'DEFENDANT': plan['tenant_names'],
         'DEFENDANT STREET ADDRESS': address, 'COUNTY OF': 'Santa Clara',
-        'TOTAL': '$3,395.00', 'PAPERCHECK': '', 'CREDITCARD': '',
+        'TOTAL': f'${amount:,.2f}', 'PAPERCHECK': '', 'CREDITCARD': '',
     }
     reader = PdfReader(io.BytesIO(template))
     fields = reader.get_fields() or {}
@@ -104,14 +133,14 @@ def render_test_retainer(plan):
         raise ValueError('Retainer widgets missing')
     digest = hashlib.sha256(pdf).hexdigest()
     return {
-        'test_only': True, 'record_id': plan['record_id'],
+        'test_only': plan.get('test_only') is True, 'record_id': plan['record_id'],
         'eviction_id': plan['eviction_id'], 'folder_id': plan['case_folder_id'],
-        'source_notice_sha256': NOTICE_SHA, 'template_sha256': TEMPLATE_SHA,
+        'source_notice_sha256': plan['source_notice_sha256'], 'template_sha256': TEMPLATE_SHA,
         'sha256': digest, 'mime_type': 'application/pdf',
-        'filename': 'TEST - Maddy retainer draft - 3395.pdf',
+        'filename': ('TEST - ' if plan.get('test_only') is True else '') + 'retainer-draft.pdf',
         'pdf_base64': base64.b64encode(pdf).decode(),
         'fields': values, 'page_count': len(saved.pages),
-        'state': 'unsigned_draft_for_review', 'retainer_price': 3395,
+        'state': 'unsigned_draft_for_review', 'retainer_price': float(amount),
         'payment_method': 'not_selected', 'approved': False, 'sent': False,
         'signed': False, 'payment_verified': False,
     }
