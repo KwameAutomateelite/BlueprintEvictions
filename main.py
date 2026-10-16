@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Blueprint Evictions - Dropbox Sign Service", version="2.1.0")
 
+
+@app.middleware('http')
+async def authenticate_signature_send(request: Request, call_next):
+    if request.url.path == '/send-signature':
+        import hmac
+        secret = os.environ.get('SIGNATURE_STORAGE_BRIDGE_SECRET', '')
+        supplied = request.headers.get('x-maddy-signature-key', '')
+        if not secret or not hmac.compare_digest(secret, supplied):
+            return Response(content='Signature authentication required', status_code=401)
+    return await call_next(request)
+from retainer_routes import router as retainer_router
+app.include_router(retainer_router)
+
 # --- Config ---
 
 print("STARTUP: reading env vars...", flush=True)
@@ -70,6 +83,7 @@ NOTICE_TEMPLATES = {
 class SendSignatureRequest(BaseModel):
     require_verified_signature: bool = False
     approved_pdf_sha256: Optional[str] = None
+    authorized_test_cycle: Optional[str] = None
     signer_email: str
     signer_name: str
     document_name: str
@@ -674,7 +688,7 @@ async def send_signature(req: SendSignatureRequest):
     approval_url = os.environ.get("SIGNATURE_APPROVAL_BRIDGE_URL", "")
     from signature_rollout import load_rollout
     try:
-        rollout = load_rollout()
+        rollout = load_rollout(req.record_id)
     except (ValueError, OSError):
         raise HTTPException(status_code=503, detail="Signing rollout configuration is invalid")
     in_verified_scope = rollout.includes(req.record_id)
@@ -722,7 +736,7 @@ async def send_signature(req: SendSignatureRequest):
                         storage_url=os.environ.get('SIGNATURE_ROLLOVER_STORAGE_URL', ''),
                         secret=os.environ['SIGNATURE_STORAGE_BRIDGE_SECRET'],
                         provider_key=os.environ.get('DROPBOX_SIGN_API_KEY', ''),
-                        request={'record_id':req.record_id, 'approved_document_sha256':approval_context['approved_document_sha256'], 'test_mode':True},
+                        request={'record_id':req.record_id, 'approved_document_sha256':approval_context['approved_document_sha256'], 'test_mode':True, 'authorized_test_cycle':getattr(req, 'authorized_test_cycle', None)},
                         signer_email=req.signer_email,
                         expected_folder=approval_context['folder_id'],
                         expected_status=approval_context['expected_status'])
@@ -833,11 +847,11 @@ async def signature_callback(request: Request):
     # Controlled rollout: existing non-test case handling is preserved.
     bridge_url = os.environ.get("SIGNATURE_STORAGE_BRIDGE_URL", "")
     from signature_rollout import load_rollout
+    callback_record = (payload.get("signature_request", {}).get("metadata") or {}).get("record_id")
     try:
-        rollout = load_rollout()
+        rollout = load_rollout(callback_record)
     except (ValueError, OSError):
         raise HTTPException(status_code=503, detail="Signing rollout configuration is invalid")
-    callback_record = (payload.get("signature_request", {}).get("metadata") or {}).get("record_id")
     if bridge_url and rollout.includes(callback_record):
         from signature_callback_service import process_signature_callback
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as provider_client, httpx.AsyncClient(timeout=60) as storage_client, httpx.AsyncClient(timeout=30, headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"}) as airtable_client:

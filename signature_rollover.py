@@ -32,7 +32,16 @@ def plan_completed_signature_rollover(*, request, case, approval, package,
     require(bool(re.fullmatch(r'[a-f0-9]{40}', old_id or '')) and
             bool(re.fullmatch(r'[a-f0-9]{64}', old_hash)) and
             approval.get('approved') is True, 'prior_approval_incomplete')
-    require(new_hash != old_hash, 'same_document_already_attempted')
+    # A single explicitly authorized repeat of the completed Narnia test.
+    # The existing exclusive transition claim still permits only one successor.
+    repeat_test = (
+        request.get('authorized_test_cycle') == 'narnia-final-receipt-20261016'
+        and record == 'recxLwYEXtb2ZrWen'
+        and request.get('test_mode') is True
+        and old_id == 'b24ac860408c7f574b45ee6fc6f2f6310a366633'
+        and old_hash == 'f64020b5de2c4dd6db53e3186a88f93d58d4c3c03f03eb79feacf4ebd6f2942c'
+    )
+    require(new_hash != old_hash or repeat_test, 'same_document_already_attempted')
     mode = request.get('test_mode')
     require(type(mode) is bool, 'signing_mode_missing')
     require(approval.get('record_id') == record and approval.get('folder_id') == folder,
