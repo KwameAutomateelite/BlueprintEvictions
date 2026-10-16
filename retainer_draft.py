@@ -40,7 +40,7 @@ def render_retainer_draft(plan):
     if not isinstance(plan, dict):
         raise ValueError('Expected a case plan')
     required = ['record_id', 'eviction_id', 'case_folder_id', 'case_name',
-                'property_address', 'tenant_names', 'source_notice_sha256']
+                'property_address', 'tenant_names']
     for key in required:
         if not isinstance(plan.get(key), str) or not plan[key].strip():
             raise ValueError('Missing case field: ' + key)
@@ -135,7 +135,8 @@ def render_retainer_draft(plan):
     return {
         'test_only': plan.get('test_only') is True, 'record_id': plan['record_id'],
         'eviction_id': plan['eviction_id'], 'folder_id': plan['case_folder_id'],
-        'source_notice_sha256': plan['source_notice_sha256'], 'template_sha256': TEMPLATE_SHA,
+        'source_notice_sha256': plan.get('source_notice_sha256'),
+        'source_case_sha256': plan.get('source_case_sha256'), 'template_sha256': TEMPLATE_SHA,
         'sha256': digest, 'mime_type': 'application/pdf',
         'filename': ('TEST - ' if plan.get('test_only') is True else '') + 'retainer-draft.pdf',
         'pdf_base64': base64.b64encode(pdf).decode(),

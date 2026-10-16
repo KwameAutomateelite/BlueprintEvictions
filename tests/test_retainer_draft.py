@@ -47,6 +47,15 @@ class RetainerRouteTests(unittest.TestCase):
             self.assertEqual(client.post('/test-retainer-draft',json=RetainerDraftTests().plan(),headers=headers).status_code,200)
 
 class GeneralRetainerTests(unittest.TestCase):
+    def test_case_snapshot_does_not_require_a_signed_notice(self):
+        from retainer_draft import render_retainer_draft
+        plan = self.plan()
+        plan.pop('source_notice_sha256')
+        plan['source_case_sha256'] = 'a' * 64
+        result = render_retainer_draft(plan)
+        self.assertIsNone(result['source_notice_sha256'])
+        self.assertEqual(result['source_case_sha256'], 'a' * 64)
+
     def plan(self):
         return {**RetainerDraftTests().plan(), 'test_only': False,
                 'record_id': 'recExampleNotice01', 'eviction_id': 'recExampleEvict001',
