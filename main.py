@@ -133,6 +133,16 @@ class GenerateNoticeRequest(BaseModel):
     landlord_state: str = ""
     landlord_zip: str = ""
     notice_date: str = ""
+    # Approved residential form separates payee, signer and provider contacts.
+    payment_recipient_name: str = ""
+    payment_address_street: str = ""
+    payment_address_city: str = ""
+    payment_phone: str = ""
+    signer_name: str = Field(default="", validation_alias=AliasChoices("signer_name", "authorized_signer_name"))
+    signer_title: str = Field(default="", validation_alias=AliasChoices("signer_title", "authorized_signer_title"))
+    housing_provider_street: str = ""
+    housing_provider_city: str = ""
+    housing_provider_phone: str = ""
     case_name: str = ""
     notice_header: str = ""  # Override for notice header text; defaults based on day_count
     is_section_8: bool = False
@@ -547,7 +557,8 @@ def merge_attachment_pdfs(notice_pdf_path: str, attachment_filenames: List[str])
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "dropbox-sign-service"}
+    from residential_notice import TEMPLATE_VERSION
+    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION}
 
 
 @app.get("/debug-template")
@@ -2052,6 +2063,25 @@ def _underline_notice_recipients(doc):
 async def generate_notice(req: GenerateNoticeRequest):
     """Generate a filled .docx eviction notice from template and return it."""
     logger.info(f"generate-notice: type={req.notice_type} day_count={req.day_count} case={req.case_name}")
+
+    if req.notice_type == "residential" and req.day_count == 3:
+        from residential_notice import NoticeInputError, TEMPLATE_VERSION, render_residential_notice
+        try:
+            content = render_residential_notice(req.model_dump())
+        except NoticeInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # Preserve the endpoint's DOCX contract and attachment-rule headers.
+        safe_name = re.sub(r'[\x00-\x1f\x7f"\\/]', '', req.case_name or "Notice")
+        safe_name = safe_name.encode("ascii", "replace").decode("ascii")[:120]
+        headers = {
+            "Content-Disposition": f'attachment; filename="3-Day Notice - {safe_name}.docx"',
+            "X-Notice-Template-Version": TEMPLATE_VERSION,
+        }
+        if req.attachments_required:
+            headers["X-Attachments-Needed"] = ",".join(req.attachments_required)
+        return Response(content=content,
+                        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        headers=headers)
 
     # Validate day count
     if req.day_count not in DAY_COUNT_WORDS:
