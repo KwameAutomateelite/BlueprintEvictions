@@ -98,11 +98,12 @@ def test_unused_rows_stay_blank_and_stray_separator_is_removed():
 
 def test_missing_signer_is_not_replaced_by_owner_or_stale_reference_person():
     data = case(); data["signer_name"] = data["signer_title"] = ""
-    text, _ = text_and_parts(data)
-    assert "Sam Example" not in text
-    assert text.count("Example Owner LLC c/o Example Realty") == 1
-    for stale in ["Chao Pang", "Leilei Wang", "750 Calla", "$5,600", "10/19/26"]:
-        assert stale not in text
+    with pytest.raises(NoticeInputError, match="Designated intake signer's"):
+        render_residential_notice(data)
+    data["signer_name"] = "Sam Example"
+    with pytest.raises(NoticeInputError):
+        render_residential_notice(data)
+
 
 
 def test_generate_endpoint_preserves_docx_and_attachment_headers():

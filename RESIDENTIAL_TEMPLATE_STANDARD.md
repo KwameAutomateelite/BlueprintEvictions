@@ -12,7 +12,7 @@ The PDF's non-printing reset-form utility is not part of the notice output.
 
 ## Field contract
 
-Existing request names remain accepted. The optional fields below distinguish
+Existing request names remain accepted. The fields below distinguish
 people and contact blocks that the old generator conflated.
 
 | Field | Visible position and rule |
@@ -31,9 +31,9 @@ people and contact blocks that the old generator conflated.
 | `landlord_email` | Accepted for compatibility but never inserted into the notice body |
 
 `authorized_signer_name` and `authorized_signer_title` are accepted aliases.
-The owner/payee is not assumed to be the authorized signer. If the signer is
-unknown, that printed-name slot remains blank for review; obtain the correct
-name/role before approval. Example names, phone numbers, addresses and dates in
+The owner/payee is not assumed to be the authorized signer. Both signer name and title are required. Missing signatory information returns
+HTTP 422 to the existing human-review branch; it never produces a blank-signatory
+notice or substitutes an owner/payee. Example names, phone numbers, addresses and dates in
 the reference never become defaults. Preserve intentional company spelling.
 
 An inconsistent rent total, malformed amount/date, ambiguous raw order-form
@@ -53,11 +53,17 @@ folder bindings, review process and signature controls remain intact. Do not
 redeploy from a different branch or transfer ownership as part of this fix.
 Existing case files are not automatically overwritten.
 
-The current n8n payload does not supply separate signer fields. Its owner field
-must not be treated as a verified manager/signatory. Configure the agent's case
-input to supply the new fields from verified case information, or collect them
-during review. A generator deployment alone does not prove that field mapping,
-Grok pickup, signing, service or historical filing is complete.
+The n8n intake's First Name + Last Name and Signer Title describe the designated
+signatory, as confirmed in the April 10 and May 11 calls. The separate Property
+Owner's Name remains the owner/payee. Initial generation and revision carry the
+signatory separately, and the approval email displays both name and title.
+Extracting an owner from a document must never overwrite the signatory surname.
+Existing waiting executions retain their captured versions and are not replayed.
+
+The saved-document revision service recognizes the six bookmarked rent rows,
+reconciles the total after edits, binds both phone positions explicitly and
+rejects edits to fixed wording or fields that would overflow their reserved
+space. The legacy table editor remains available for older notice families.
 
 For later case edits, update case fields in the same master/version and retain
 its static paragraphs, page breaks, typography and artwork. Avoid generic

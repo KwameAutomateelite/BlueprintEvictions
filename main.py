@@ -558,7 +558,7 @@ def merge_attachment_pdfs(notice_pdf_path: str, attachment_filenames: List[str])
 @app.get("/health")
 async def health():
     from residential_notice import TEMPLATE_VERSION
-    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION}
+    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True}
 
 
 @app.get("/debug-template")

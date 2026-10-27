@@ -208,9 +208,9 @@ def fields_for_case(data):
     signer = clean(data.get("signer_name") or data.get("authorized_signer_name"))
     role = clean(data.get("signer_title") or data.get("authorized_signer_title"))
     # An owner/payee and their authorized signer may be different people.
-    # Missing signatory information stays blank for review, never guessed.
-    if role and not signer:
-        raise NoticeInputError("Signer title requires a signer name")
+    # Incomplete intake goes to the existing 422 human-review branch.
+    if not signer or not role:
+        raise NoticeInputError("Designated intake signer's full name and Signer Title are required; do not substitute the property owner or payment recipient")
     signer_lines = two_lines(signer + (", " + role if role else ""), 271, "Printed signer")
     f["SIGNER_NAME_AND_TITLE"], f["SIGNER_CONTINUED"] = signer_lines
     return f
