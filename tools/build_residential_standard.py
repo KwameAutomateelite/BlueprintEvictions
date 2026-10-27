@@ -6,7 +6,6 @@ Run locally when the approved master changes; generation does not run this tool.
 """
 from copy import deepcopy
 from pathlib import Path
-import sys
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -39,8 +38,8 @@ def build():
     pg.set(qn("w:bottom"), "720")
     # Page geometry/artwork/footer are inherited from the source Word package.
     doc._element.body.insert(0, artwork)
-    # The reference footer is artwork anchored to the page. Put that retained
-    # artwork on each explicit page anchor so Word/LibreOffice agree even when
+    # The reference footer is artwork anchored to its first page. Put that
+    # artwork on the retained page anchor so Word/LibreOffice agree even when
     # a footer's tiny inherited paragraph height is collapsed.
     artwork.append(deepcopy(footer_run))
     from docx.text.paragraph import Paragraph

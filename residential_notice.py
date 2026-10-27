@@ -69,7 +69,10 @@ def fit(value, width, field):
 
 
 def two_lines(value, width, field, first_prefix=""):
-    words = clean(value).split()
+    value = clean(value)
+    if "{{" in value or "}}" in value:
+        raise NoticeInputError(f"Invalid template text in {field}")
+    words = value.split()
     lines = [""]
     for word in words:
         candidate = (lines[-1] + " " + word).strip()
