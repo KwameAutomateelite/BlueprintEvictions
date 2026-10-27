@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from docx import Document
 
-TEMPLATE_VERSION = "residential-pay-or-quit-2026-10-26"
+TEMPLATE_VERSION = "residential-pay-or-quit-2026-10-26-layout2"
 REFERENCE_SHA256 = "0e23f57004a2f9842acaab92a334d46c031a5d09e31f4f3900b91f531418825d"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-2026-10.docx"
 MAX_RENT_ROWS = 6
