@@ -45,6 +45,15 @@ Local use (no network, email, signing or case changes):
 python tools/render_residential_pdf.py case.json notice.pdf
 ```
 
-The PDF route is additive. Switching a DOCX consumer to PDF requires checking its
-filename, editor, review and approval handling; changing only the URL would break
-those assumptions. No such workflow switch is included in this change.
+`POST /render-saved-notice-pdf` accepts `docx_base64` and `expected_sha256`.
+It reads the named fields from the actual saved Word editing copy, checks the
+unchanged boilerplate and rent columns, and returns the exact PDF, its hash and
+the Word source hash. Other notice families return `is_standard: false` and keep
+their existing conversion. A malformed residential form fails instead of falling
+back to a layout that can move.
+
+The approval copy is the exact PDF. Word remains the editing source. After an
+edit, make a fresh PDF and obtain approval of that version. Before approval is
+frozen, compare the saved review PDF's bytes and a fresh render of the current
+Word against the reviewed PDF hash. A mismatch requires a fresh review; never
+silently substitute the edited Word conversion for the PDF she approved.

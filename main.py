@@ -559,7 +559,7 @@ def merge_attachment_pdfs(notice_pdf_path: str, attachment_filenames: List[str])
 async def health():
     from residential_notice import TEMPLATE_VERSION
     from residential_pdf import PDF_TEMPLATE_VERSION
-    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION}
+    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True}
 
 
 @app.get("/debug-template")
@@ -2058,6 +2058,25 @@ def _underline_notice_recipients(doc):
                 run.text = text[:split]
                 run.underline = False
             offset = end
+
+
+class SavedNoticePdfRequest(BaseModel):
+    docx_base64: str = Field(max_length=6_000_000)
+    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@app.post("/render-saved-notice-pdf")
+async def render_saved_notice_pdf(req: SavedNoticePdfRequest):
+    """Produce the exact PDF from the actual saved Word editing snapshot."""
+    import base64
+    import binascii
+    from residential_notice import NoticeInputError
+    from residential_word_snapshot import render_saved_word_pdf
+    try:
+        source = base64.b64decode(req.docx_base64, validate=True)
+        return render_saved_word_pdf(source, req.expected_sha256)
+    except (NoticeInputError, binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/generate-notice-pdf")
