@@ -2061,7 +2061,7 @@ def _underline_notice_recipients(doc):
 
 
 @app.post("/generate-notice-pdf")
-async def generate_notice_pdf(req: GenerateNoticeRequest):
+async def generate_original_notice_pdf(req: GenerateNoticeRequest):
     """Fill the original two-page residential three-day PDF, without reflow."""
     from residential_notice import NoticeInputError, REFERENCE_SHA256
     from residential_pdf import PDF_TEMPLATE_VERSION, render_residential_pdf
