@@ -558,7 +558,8 @@ def merge_attachment_pdfs(notice_pdf_path: str, attachment_filenames: List[str])
 @app.get("/health")
 async def health():
     from residential_notice import TEMPLATE_VERSION
-    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True}
+    from residential_pdf import PDF_TEMPLATE_VERSION
+    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION}
 
 
 @app.get("/debug-template")
@@ -2057,6 +2058,27 @@ def _underline_notice_recipients(doc):
                 run.text = text[:split]
                 run.underline = False
             offset = end
+
+
+@app.post("/generate-notice-pdf")
+async def generate_notice_pdf(req: GenerateNoticeRequest):
+    """Fill the original two-page residential three-day PDF, without reflow."""
+    from residential_notice import NoticeInputError, REFERENCE_SHA256
+    from residential_pdf import PDF_TEMPLATE_VERSION, render_residential_pdf
+    try:
+        content = render_residential_pdf(req.model_dump())
+    except NoticeInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    safe_name = re.sub(r'[\x00-\x1f\x7f"\\/]', '', req.case_name or "Notice")
+    safe_name = safe_name.encode("ascii", "replace").decode("ascii")[:120]
+    headers = {
+        "Content-Disposition": f'attachment; filename="3-Day Notice - {safe_name}.pdf"',
+        "X-Notice-Template-Version": PDF_TEMPLATE_VERSION,
+        "X-Notice-Template-SHA256": REFERENCE_SHA256,
+    }
+    if req.attachments_required:
+        headers["X-Attachments-Needed"] = ",".join(req.attachments_required)
+    return Response(content=content, media_type="application/pdf", headers=headers)
 
 
 @app.post("/generate-notice")
