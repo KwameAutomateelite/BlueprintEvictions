@@ -24,6 +24,17 @@ Airtable index; its successful edit then calls the same PDF preparation tool.
 If PDF preparation fails after an edit, the receipt says Word was saved but the
 PDF is not ready. Retry only PDF preparation, not the original edit.
 
+The revision tool exposes the deployed `plan_json` contract in its argument
+description. Rent edits use `state: "rent_changes"` and a `rows` array containing
+the zero-based index in the latest inspected rent table, `new_amount`, and a
+verbatim `instruction_quote`. Paragraph indexes are not rent row indexes. The
+tool recalculates the total; money must never be changed through generic text
+replacements. Phone-only corrections use the documented deterministic phone
+command and update both bound phone fields. For a request containing both rent
+and phone corrections, apply them separately and reread the saved document and
+version after each successful edit. Inspect the final receipt and saved values
+before reporting that all requested corrections are complete.
+
 Maddy must use the returned receipt as the source of truth. `draft_ready_for_review`
 means saved and read back, with PDF and Word links. It never means approved,
 signed, emailed or delivered. A notification without such a receipt does not

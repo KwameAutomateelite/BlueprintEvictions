@@ -43,3 +43,22 @@ process.stdout.write(JSON.stringify(vals.map(t=>{type=t;return eval(expr)})));""
     result=subprocess.run(['node','-e',code],text=True,capture_output=True,check=True)
     assert json.loads(result.stdout)==[True,True,False,False,False]
     assert w['connections']['Prepare Edited Exact PDF']['main'][1][0]['node']=='Return Edited PDF Hold'
+
+def test_revision_contract_documents_guarded_shapes_without_changing_dispatch():
+    before={'nodes':[{'name':'revise_case_notice','credentials':{'id':'keep'},
+        'parameters':{'description':'Existing guarded editor',
+            'workflowId':{'value':'EXISTING_EDITOR'},
+            'workflowInputs':{'value':{'record_id':'keep', 'plan_json':'old'}}}}],
+        'connections':{'unchanged':{}},'settings':{'unchanged':True}}
+    after=m.revision_contract(before)
+    node=after['nodes'][0]
+    expression=node['parameters']['workflowInputs']['value']['plan_json']
+    assert 'rent_changes' in expression and 'row_index' in expression
+    assert 'ZERO-BASED' in expression and 'not a paragraph index' in expression
+    assert 'recalculates' in expression and 'deterministic phone parser' in expression
+    assert 'separate calls' in expression and 'instruction_quote' in expression
+    assert node['parameters']['workflowId']==before['nodes'][0]['parameters']['workflowId']
+    assert node['credentials']==before['nodes'][0]['credentials']
+    assert after['connections']==before['connections'] and after['settings']==before['settings']
+    assert before['nodes'][0]['parameters']['workflowInputs']['value']['plan_json']=='old'
+    assert m.revision_contract(after)==after
