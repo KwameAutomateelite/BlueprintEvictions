@@ -1,8 +1,8 @@
-"""Fill Anne-Michelle's original PDF. Never reconstruct or reflow its pages.
+"""Fill Anne-Michelle's original PDF; paginate only an overflowing rent list.
 
 PDF coordinates are points from the lower-left corner (72 points/inch).
-Only widget values and their text appearances change. Page content streams,
-field rectangles, fonts, signature line and page breaks stay in the source.
+For a fitting schedule only widget values and appearances change. An overflowing
+schedule uses measured continuation pages with the source's paragraph fragments.
 """
 from hashlib import sha256
 from io import BytesIO
@@ -60,8 +60,8 @@ def _width(text, font):
 
 
 def _lines(text, width, font, multiline):
-    # Exact source font advances. Reject overflow; never shrink, clip,
-    # reposition a field or create a third page to accommodate it.
+    # Exact source font advances for the fixed case fields. Rent period text
+    # uses the separate paginator when it exceeds the original rent boxes.
     if not multiline:
         if _width(text, font) > width - 4:
             raise NoticeInputError("A case field exceeds its original PDF box; human review required")
@@ -115,11 +115,11 @@ def _appearance(writer, widget, field, text, fonts):
     widget[NameObject("/AP")] = DictionaryObject({NameObject("/N"): writer._add_object(ap)})
 
 
-def render_residential_pdf(data, template_path=MASTER):
+def _render_original(values, template_path=MASTER):
     source = Path(template_path).read_bytes()
     if sha256(source).hexdigest() != MASTER_SHA256:
         raise RuntimeError("Original approved PDF changed; do not substitute a reconstructed form")
-    values = fields_for_case(data)
+    values = dict(values)
     values["TENANT_NAMES"] = " ".join(filter(None, (values["TENANT_NAMES"], values["TENANT_NAMES_CONTINUED"])))
     values["SIGNER_NAME_AND_TITLE"] = " ".join(filter(None, (values["SIGNER_NAME_AND_TITLE"], values["SIGNER_CONTINUED"])))
     values["CC"] = ""
@@ -186,3 +186,23 @@ def render_residential_pdf(data, template_path=MASTER):
     out = BytesIO()
     final.write(out)
     return out.getvalue()
+
+
+def render_residential_pdf(data, template_path=MASTER):
+    values = fields_for_case(data)
+    rows = len(data["amounts_due"])
+    # The six original boxes have slightly different measured widths. Keep
+    # short notices byte-for-byte on that original path; long labels or lists
+    # use the same artwork and paragraph fragments with measured pagination.
+    widths = (163.379, 159.536, 163.537, 163.379, 159.536, 163.537)
+    overflow = rows > 6 or any(
+        _width(values[f"PERIOD_{i}"], "TiRo") > widths[i-1]-4 or
+        _width(values[f"AMOUNT_{i}"], "TiRo") > 71.636
+        for i in range(1, min(rows, 6)+1))
+    if not overflow:
+        return _render_original(values, template_path)
+    base_values = dict(values)
+    for i in range(1, 7):
+        base_values[f"PERIOD_{i}"] = base_values[f"AMOUNT_{i}"] = ""
+    from residential_pdf_flow import render_flowing_pdf
+    return render_flowing_pdf(_render_original(base_values, template_path), values, rows)

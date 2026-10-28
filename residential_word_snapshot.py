@@ -11,15 +11,14 @@ import re
 
 from docx import Document
 
-from residential_notice import MASTER as WORD_MASTER, NoticeInputError
+from residential_notice import MASTER as WORD_MASTER, MAX_RENT_ROWS, NoticeInputError
 from residential_pdf import PDF_TEMPLATE_VERSION, render_residential_pdf
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-FIELD_NAMES = {
+STATIC_FIELD_NAMES = {
     "TENANT_NAMES", "PROPERTY_STREET", "PROPERTY_CITY", "COUNTY",
     "PAYMENT_RECIPIENT", "PAYMENT_STREET", "PAYMENT_CITY", "PAYMENT_PHONE",
     "NOTICE_DATE", "SIGNER_NAME_AND_TITLE", "PROVIDER_STREET", "PROVIDER_CITY", "PROVIDER_PHONE",
-    *{f"RENT_ROW_{i}" for i in range(1, 7)},
 }
 
 
@@ -68,16 +67,30 @@ def saved_word_case(content):
     identifier = doc.core_properties.identifier or ""
     if not bindings and not identifier.startswith("residential-pay-or-quit-"):
         return None
-    if set(bindings) != FIELD_NAMES or not identifier.startswith("residential-pay-or-quit-"):
+    rent_names = {k for k in bindings if re.fullmatch(r"RENT_ROW_[1-9][0-9]*", k)}
+    row_count = len(rent_names)
+    if (not 6 <= row_count <= MAX_RENT_ROWS or
+            rent_names != {f"RENT_ROW_{i}" for i in range(1, row_count + 1)} or
+            set(bindings) != STATIC_FIELD_NAMES | rent_names or
+            not identifier.startswith("residential-pay-or-quit-")):
         raise NoticeInputError("Saved residential Word form lost its field bindings; fresh review required")
     master = Document(WORD_MASTER)
     expected = _bindings(master)
     a, b = list(master.element.iter(W + "p")), list(doc.element.iter(W + "p"))
-    if len(a) != len(b) or any(bindings[k][0] != expected[k][0] for k in FIELD_NAMES):
+    extra_indices = {bindings[f"RENT_ROW_{i}"][0] for i in range(7, row_count + 1)}
+    reduced = [p for i, p in enumerate(b) if i not in extra_indices]
+    # Extra rows must be consecutive, directly after row six. Removing only
+    # those rows must restore the exact master paragraph/field ordering.
+    first = bindings["RENT_ROW_1"][0]
+    if (len(a) != len(reduced) or any(bindings[f"RENT_ROW_{i}"][0] != first + i - 1 for i in range(1, row_count + 1)) or
+            any(bindings[k][1] not in reduced or reduced.index(bindings[k][1]) != expected[k][0]
+                for k in STATIC_FIELD_NAMES)):
         raise NoticeInputError("Saved Word form structure changed; regenerate the review copy")
     total = _total(doc)
-    allowed = {i for i, _ in bindings.values()} | {b.index(total)}
-    if any(_text(x) != _text(y) for i, (x, y) in enumerate(zip(a, b)) if i not in allowed):
+    if total not in reduced:
+        raise NoticeInputError("Saved Word total moved into a rent row; regenerate the review copy")
+    allowed = {i for i, _ in expected.values()} | {reduced.index(total)}
+    if any(_text(x) != _text(y) for i, (x, y) in enumerate(zip(a, reduced)) if i not in allowed):
         raise NoticeInputError("Saved Word boilerplate changed; human review required")
     values = {k: _text(p).strip() for k, (_, p) in bindings.items()}
     if not values["TENANT_NAMES"].startswith("To: ") or not values["COUNTY"].startswith("COUNTY OF "):
@@ -91,7 +104,7 @@ def saved_word_case(content):
     if not values["PROVIDER_PHONE"].startswith("Phone: "):
         raise NoticeInputError("Saved housing-provider phone label changed")
     rows, blank = [], False
-    for i in range(1, 7):
+    for i in range(1, row_count + 1):
         p = bindings[f"RENT_ROW_{i}"][1]
         tokens = [""]
         for n in p.iter():

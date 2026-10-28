@@ -1,7 +1,5 @@
-"""Case-field filling for the approved two-page residential notice master.
-
-No paragraph insertion, layout rewrite, LLM, network call, or signing occurs here.
-"""
+"""Fill the approved residential form; add bound rent rows when necessary."""
+from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
@@ -15,7 +13,9 @@ from docx import Document
 TEMPLATE_VERSION = "residential-pay-or-quit-2026-10-26-layout2"
 REFERENCE_SHA256 = "0e23f57004a2f9842acaab92a334d46c031a5d09e31f4f3900b91f531418825d"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-2026-10.docx"
-MAX_RENT_ROWS = 6
+FIXED_RENT_ROWS = 6
+# Resource bound, not a layout limit. Never truncate a submitted schedule.
+MAX_RENT_ROWS = 1000
 
 
 class NoticeInputError(ValueError):
@@ -163,7 +163,7 @@ def fields_for_case(data):
         raise NoticeInputError("Premises county is required")
     rows = data.get("amounts_due") or []
     if not 1 <= len(rows) <= MAX_RENT_ROWS:
-        raise NoticeInputError("The approved form has six rent rows; one to six rows required. Do not truncate or alter the form")
+        raise NoticeInputError(f"Provide one to {MAX_RENT_ROWS} itemized rent entries; no entries may be truncated")
     f = {
         "TENANT_NAMES": tenants[0], "TENANT_NAMES_CONTINUED": tenants[1],
         "PROPERTY_STREET": fit(street, 445, "Premises street"),
@@ -172,14 +172,17 @@ def fields_for_case(data):
         "NOTICE_DATE": notice_date(data.get("notice_date")),
     }
     total = Decimal("0.00")
-    for i in range(1, MAX_RENT_ROWS + 1):
+    for i in range(1, max(FIXED_RENT_ROWS, len(rows)) + 1):
         period = amount = ""
         if i <= len(rows):
             row = rows[i - 1]
             period = re.sub(r"^[;\s]+", "", clean(row.get("due_date")))
             if not period:
                 raise NoticeInputError("Each rent row needs a period/date")
-            period = fit(period, 176, "Rent period")
+            if "{{" in period or "}}" in period:
+                raise NoticeInputError("Invalid template text in rent period")
+            if len(period) > 10000:
+                raise NoticeInputError("Rent period text exceeds the notice input size limit")
             value = money(row.get("amount"))
             if value <= 0:
                 raise NoticeInputError("Each rent row must have a positive amount")
@@ -219,6 +222,27 @@ def fields_for_case(data):
 def render_residential_notice(data, template_path=MASTER):
     fields = fields_for_case(data)
     doc = Document(template_path)
+    count = max(FIXED_RENT_ROWS, len(data["amounts_due"]))
+    if count > FIXED_RENT_ROWS:
+        # Word is the editing source. Each extra entry has its own named binding
+        # and actual tab separator, so a later PDF refresh reads every row.
+        from docx.oxml.ns import qn
+        source = next(p._p for p in doc.paragraphs if any(
+            b.get(qn("w:name")) == "BE_RENT_ROW_6" for b in p._p.iter(qn("w:bookmarkStart"))))
+        last = source
+        bookmark_id = max(int(b.get(qn("w:id"))) for b in doc.element.iter(qn("w:bookmarkStart")))
+        for number in range(7, count + 1):
+            extra = deepcopy(source)
+            bookmark_id += 1
+            for b in extra.iter(qn("w:bookmarkStart")):
+                b.set(qn("w:name"), f"BE_RENT_ROW_{number}")
+                b.set(qn("w:id"), str(bookmark_id))
+            for b in extra.iter(qn("w:bookmarkEnd")):
+                b.set(qn("w:id"), str(bookmark_id))
+            for t in extra.iter(qn("w:t")):
+                t.text = (t.text or "").replace("PERIOD_6", f"PERIOD_{number}").replace("AMOUNT_6", f"AMOUNT_{number}")
+            last.addnext(extra)
+            last = extra
     seen = set()
     paragraphs = list(doc.paragraphs)
     for table in doc.tables:
