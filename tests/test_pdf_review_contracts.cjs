@@ -42,6 +42,15 @@ test('PDF preparation binds the saved Word source, PDF bytes and template versio
  await assert.rejects(run('prepare-pdf.js',{...r,pdf_base64:Buffer.from('tampered').toString('base64')},refs),/does not match/);
 });
 
+test('October 28 format is accepted without weakening Word/PDF hash checks', async()=>{
+ const r=result();r.template_version='residential-original-pdf-2026-10-28-format3';
+ const nodes={'Prepare Saved Word Snapshot':{expected_sha256:sourceHash}};
+ const out=await run('prepare-pdf.js',r,nodes);
+ assert.equal(out[0].json.name,'3-Day Notice - PDF Review - '+sourceHash.slice(0,16)+'.pdf');
+ const bad={...r,source_docx_sha256:'wrong'};
+ await assert.rejects(run('prepare-pdf.js',bad,nodes),/does not match/);
+});
+
 test('saved reviewer snapshot keeps Word for edits and carries current printed values',async()=>{
  const s=snapshot();const r=result();
  const refs={'Verify Saved Word Location':{id:'WORD-1',eTag:'v1',webUrl:'https://example.invalid/word'},'Validate Review Context':{snapshot:s},'Render Saved Word as Exact PDF':r,'Verify Saved PDF Location':{id:'PDF-1',webUrl:'https://example.invalid/pdf'}};

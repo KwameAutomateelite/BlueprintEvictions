@@ -13,6 +13,7 @@ from docx import Document
 
 from residential_notice import MASTER as WORD_MASTER, MAX_RENT_ROWS, NoticeInputError
 from residential_pdf import PDF_TEMPLATE_VERSION, render_residential_pdf
+from notice_display import display_inputs
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 STATIC_FIELD_NAMES = {
@@ -147,6 +148,7 @@ def render_saved_word_pdf(content, expected_sha256):
     case = saved_word_case(content)
     if case is None:
         return {"is_standard": False, "source_docx_sha256": digest}
+    case = display_inputs(case)
     pdf = render_residential_pdf(case)
     import base64
     return {"is_standard": True, "source_docx_sha256": digest,
