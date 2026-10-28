@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import subprocess
 from pathlib import Path
 
 P=Path(__file__).resolve().parents[1]/'integrations/n8n/grok-notice'
@@ -28,3 +30,16 @@ def test_refresh_requires_exact_version_and_leaves_inspection_separate():
     assert 'r.eTag!==input.expected_version' in guard
     assert before==fake_read()
     assert all(n['parameters'].get('method','GET')=='GET' for n in w['nodes'] if n['type'].endswith('httpRequest'))
+
+def test_edit_routes_only_residential_three_day_to_pdf_and_preserves_existing_nodes():
+    old={'nodes':[{'id':'same','name':'Return Indexed Edit Receipt','parameters':{'jsCode':'original'}}],
+         'connections':{},'settings':{'executionOrder':'v1'}}
+    w=m.revise(old,'REVIEW')
+    assert w['nodes'][:1]==old['nodes'] and w['settings']==old['settings']
+    expr=w['nodes'][1]['parameters']['conditions']['conditions'][0]['leftValue'][3:-2]
+    code="""const expr=EXPR;let type;const $=()=>({first:()=>({json:{fields:{'Notice Type':type}}})});
+const vals=['3-day to pay or quit','three day notice to pay rent or quit','Commercial 3-day pay rent or quit','5-day pay rent or quit','30-day termination'];
+process.stdout.write(JSON.stringify(vals.map(t=>{type=t;return eval(expr)})));""".replace('EXPR',json.dumps(expr))
+    result=subprocess.run(['node','-e',code],text=True,capture_output=True,check=True)
+    assert json.loads(result.stdout)==[True,True,False,False,False]
+    assert w['connections']['Prepare Edited Exact PDF']['main'][1][0]['node']=='Return Edited PDF Hold'
