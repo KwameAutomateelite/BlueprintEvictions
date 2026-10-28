@@ -66,7 +66,14 @@ def total_cell(root):
 def inspect_standard(root):
     b = bindings(root)
     rows, blank_seen = [], False
-    for n in range(1, 7):
+    rent_names = {k for k in b if k.startswith('BE_RENT_ROW_')}
+    count = len(rent_names)
+    if not 6 <= count <= 1000 or rent_names != {'BE_RENT_ROW_'+str(i) for i in range(1, count+1)}:
+        raise ValueError('Rent row bindings are missing, repeated or out of sequence')
+    first = b['BE_RENT_ROW_1'][0]
+    if any(b['BE_RENT_ROW_'+str(i)][0] != first+i-1 for i in range(1,count+1)):
+        raise ValueError('Rent row order changed')
+    for n in range(1, count+1):
         i, p = b['BE_RENT_ROW_'+str(n)]
         tokens = []
         current = ''
@@ -148,6 +155,7 @@ def validate_edit(before, after):
             if any(width(v) > WIDTHS[key]-4 or '{{' in v or '}}' in v for v in values):
                 raise ValueError('Edited field exceeds approved space')
         elif name.startswith('BE_RENT_ROW_'):
-            values = text(p)
-            if width(values) > 272:
-                raise ValueError('Edited rent row exceeds approved space')
+            # The PDF paginator wraps period text in its own column. Inspect
+            # above verifies the independent amount cell and reconciled total.
+            if len(text(p)) > 10100 or '{{' in text(p) or '}}' in text(p):
+                raise ValueError('Edited rent row exceeds the notice input size limit')

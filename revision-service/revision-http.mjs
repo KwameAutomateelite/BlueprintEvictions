@@ -5,7 +5,7 @@ export function revisionServer({secret,worker}) {
  const expected=Buffer.from(secret);
  return createServer(async(req,res)=>{
   const reply=(status,body)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(body))};
-  if(req.method==='GET'&&req.url==='/health')return reply(200,{status:'ok',revision_enabled:true,mode:'persistent-document-transform',revision_version:'fixed-form-2026-10-26'});
+  if(req.method==='GET'&&req.url==='/health')return reply(200,{status:'ok',revision_enabled:true,mode:'persistent-document-transform',revision_version:'fixed-form-2026-10-26',rent_row_limit:1000});
   if(req.method!=='POST'||req.url!=='/events/notice-revision')return reply(404,{error:'not_found'});
   const given=Buffer.from(String(req.headers['x-maddy-event-key']||''));
   if(given.length!==expected.length||!timingSafeEqual(given,expected))return reply(401,{error:'unauthorized'});

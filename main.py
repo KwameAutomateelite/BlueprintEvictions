@@ -559,7 +559,8 @@ def merge_attachment_pdfs(notice_pdf_path: str, attachment_filenames: List[str])
 async def health():
     from residential_notice import TEMPLATE_VERSION
     from residential_pdf import PDF_TEMPLATE_VERSION
-    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True}
+    from residential_pdf_flow import RENDERER_VERSION
+    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True, "residential_rent_pagination": RENDERER_VERSION}
 
 
 @app.get("/debug-template")
@@ -2081,7 +2082,7 @@ async def render_saved_notice_pdf(req: SavedNoticePdfRequest):
 
 @app.post("/generate-notice-pdf")
 async def generate_original_notice_pdf(req: GenerateNoticeRequest):
-    """Fill the original two-page residential three-day PDF, without reflow."""
+    """Fill the original residential form and paginate overflowing rent safely."""
     from residential_notice import NoticeInputError, REFERENCE_SHA256
     from residential_pdf import PDF_TEMPLATE_VERSION, render_residential_pdf
     try:

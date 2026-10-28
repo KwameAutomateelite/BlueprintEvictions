@@ -76,7 +76,6 @@ def test_template_structure_is_identical_for_one_three_and_six_rows():
 @pytest.mark.parametrize("change", [
     {"total_amount_due": "2999.99"},
     {"amounts_due": [{"due_date": "8/1/2026", "amount": "NOT_FOUND"}]},
-    {"amounts_due": case(7)["amounts_due"], "total_amount_due": "7000"},
     {"tenant_names": "WideName " * 35},
     {"county": ""},
     {"notice_date": "2026-02-30"},

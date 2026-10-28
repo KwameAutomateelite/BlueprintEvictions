@@ -65,7 +65,6 @@ def test_both_linked_contact_appearances_update_and_can_differ():
 
 @pytest.mark.parametrize("change", [
     {"total_amount_due": "1"}, {"signer_name": ""},
-    {"amounts_due": [{"due_date": "10/1/2026", "amount": "1000"}] * 7},
     {"property_address_city": "W" * 60},
 ])
 def test_invalid_or_overflow_inputs_hold_instead_of_reflow(change):
