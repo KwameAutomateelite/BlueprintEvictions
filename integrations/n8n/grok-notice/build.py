@@ -10,6 +10,39 @@ spec=importlib.util.spec_from_file_location('pdf_review_builder',P.parent/'exact
 b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
 BASE=b.BASE
 
+REVISION_PLAN_DESCRIPTION = (
+    'JSON STRING using one supported plan shape. Rent-only: '
+    '{"state":"rent_changes","rows":[{"row_index":0,"new_amount":"1100.50",'
+    '"instruction_quote":"verbatim reviewer clause naming the month and amount"}]}. '
+    'row_index is ZERO-BASED in the latest read_case_notice rent_tables[0].rows, '
+    'not a paragraph index. Do not propose a total edit: the tool recalculates it. '
+    'Phone-only: use instruction "Change the landlord phone number from OLD to NEW. '
+    'Keep everything else unchanged." and plan_json '
+    '{"state":"held","question":"Use the deterministic phone parser"}; '
+    'the parser updates both bound phone fields. Other text: '
+    '{"state":"changes","changes":[{"old":"exact unique saved text",'
+    '"new":"replacement","instruction_quote":"verbatim reviewer clause"}]}. '
+    'Never use generic text changes for money. For mixed rent and phone requests, '
+    'make separate calls with only the authorized clause for that edit and reread '
+    'the saved Word/version between calls. Never use operations/edits/replacements '
+    'as top-level plan keys. A rejected edit has not saved; clarify the contract '
+    'rather than guessing another shape.'
+)
+
+def revision_contract(before):
+    """Document the existing deployed edit protocol without changing its guards."""
+    w=deepcopy(before)
+    n=next(n for n in w['nodes'] if n['name']=='revise_case_notice')
+    n['parameters']['workflowInputs']['value']['plan_json']=(
+        "={{ $fromAI('plan_json', '"+REVISION_PLAN_DESCRIPTION+"', 'string') }}")
+    suffix=(' EDIT CONTRACT: Read the current Word first. Split mixed rent and phone '
+            'requests into separate calls and reread after each save. Follow the exact '
+            'plan_json schema; rent row indexes are zero-based and totals are automatic. '
+            'Show the last successful exact PDF after all requested corrections.')
+    if suffix not in n['parameters']['description']:
+        n['parameters']['description']+=suffix
+    return w
+
 def js(file): return (P/file).read_text()
 def call(name,wid):
     return b.node(name,'executeWorkflow',{'source':'database','workflowId':{'__rl':True,'value':wid,'mode':'id'},
@@ -128,4 +161,4 @@ def mcp(before,draft_id,review_id):
         if n['name']=='read_case_notice':n['parameters']['description']+=' For the correct PDF review copy after edits, call prepare_case_notice_review with this exact item/version; do not present Word as the final PDF.'
         if n['name']=='revise_case_notice':n['parameters']['description']+=' Residential three-day edits automatically prepare the matching exact PDF. Present its PDF and Word links only when draft_ready_for_review. If word_saved_pdf_not_ready, retry only prepare_case_notice_review, never the edit. This cannot approve or send.'
         if n['name']=='get_case_documents':n['parameters']['description']+=' For a NEW residential three-day notice use draft_case_notice. Never claim notice creation from an email or Slack status alone; obtain a verified ready receipt with PDF and Word links.'
-    return w
+    return revision_contract(w)
