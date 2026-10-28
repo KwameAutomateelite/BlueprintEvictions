@@ -9,8 +9,10 @@ import unicodedata
 from zoneinfo import ZoneInfo
 
 from docx import Document
+from docx.shared import Pt
+from notice_display import address_display, display_inputs
 
-TEMPLATE_VERSION = "residential-pay-or-quit-2026-10-26-layout2"
+TEMPLATE_VERSION = "residential-pay-or-quit-2026-10-28-format3"
 REFERENCE_SHA256 = "0e23f57004a2f9842acaab92a334d46c031a5d09e31f4f3900b91f531418825d"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-2026-10.docx"
 FIXED_RENT_ROWS = 6
@@ -120,21 +122,9 @@ def address_parts(data, prefix):
             s = clean(data.get("landlord_state"))
             z = clean(data.get("landlord_zip"))
             city = (c + (", " if c and s else "") + s.upper() + (" " if z and (c or s) else "") + z).strip()
-    if not street:
-        # Preserve unit components on the street line when splitting a full
-        # address. Prefer explicit street/city inputs for unusual addresses.
-        parts = [p.strip() for p in full.split(",") if p.strip()]
-        if city:
-            street = full
-            suffix = re.escape(city).replace(r"\ ", r"\s+")
-            street = re.sub(r",?\s*" + suffix + r"$", "", street, flags=re.I).strip(" ,")
-        elif len(parts) >= 3:
-            street = ", ".join(parts[:-2])
-            city = ", ".join(parts[-2:])
-        elif len(parts) == 2:
-            street, city = parts
-        else:
-            street = full
+    street, city = address_display(street, city, full)
+    if not street or not city:
+        raise NoticeInputError(f"Complete {prefix} street and city/state/ZIP are required; do not guess missing address details")
     if prefix == "property":
         for key, label in (("apt", "Apt"), ("unit", "Unit")):
             unit = clean(data.get(key))
@@ -147,6 +137,7 @@ def address_parts(data, prefix):
 
 
 def fields_for_case(data):
+    data = display_inputs(data)
     if data.get("notice_type") != "residential" or data.get("day_count") != 3:
         raise NoticeInputError("This master is only for residential three-day pay-or-quit notices")
     override = clean(data.get("notice_header"))
@@ -198,14 +189,19 @@ def fields_for_case(data):
     if re.search(r"\b(?:company|owner[’']?s?\s+name)\s*:", payee, re.I):
         raise NoticeInputError("Payment recipient needs a verified display name; raw order-form labels require review")
     p_street, p_city = address_parts(data, "payment")
+    provider_street, provider_city = address_display(
+        data.get("housing_provider_street") or p_street,
+        data.get("housing_provider_city") or p_city, "")
+    if not provider_street or not provider_city:
+        raise NoticeInputError("Complete housing-provider street and city/state/ZIP are required")
     phone = clean(data.get("payment_phone")) or clean(data.get("landlord_phone"))
     f.update({
         "PAYMENT_RECIPIENT": fit(payee, 420, "Payment recipient"),
         "PAYMENT_STREET": fit(p_street, 420, "Payment street"),
         "PAYMENT_CITY": fit(p_city, 420, "Payment city/state/ZIP"),
         "PAYMENT_PHONE": fit(phone, 415, "Payment phone"),
-        "PROVIDER_STREET": fit(clean(data.get("housing_provider_street")) or p_street, 375, "Housing-provider street"),
-        "PROVIDER_CITY": fit(clean(data.get("housing_provider_city")) or p_city, 375, "Housing-provider city/state/ZIP"),
+        "PROVIDER_STREET": fit(provider_street, 375, "Housing-provider street"),
+        "PROVIDER_CITY": fit(provider_city, 375, "Housing-provider city/state/ZIP"),
         "PROVIDER_PHONE": fit(clean(data.get("housing_provider_phone")) or phone, 325, "Housing-provider phone"),
     })
     signer = clean(data.get("signer_name") or data.get("authorized_signer_name"))
@@ -256,6 +252,8 @@ def render_residential_notice(data, template_path=MASTER):
                     raise RuntimeError(f"Unknown field in approved master: {key}")
                 seen.add(key)
                 run.text = run.text.replace("{{" + key + "}}", fields[key])
+                run.font.name = "Times New Roman"
+                run.font.size = Pt(12)
     if seen != set(fields):
         raise RuntimeError("Approved master field map is incomplete")
     doc.core_properties.identifier = TEMPLATE_VERSION

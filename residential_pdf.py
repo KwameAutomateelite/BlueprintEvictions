@@ -1,7 +1,8 @@
 """Fill Anne-Michelle's original PDF; paginate only an overflowing rent list.
 
 PDF coordinates are points from the lower-left corner (72 points/inch).
-For a fitting schedule only widget values and appearances change. An overflowing
+For a fitting schedule only variable appearances and the approved heading/date
+typography change. An overflowing
 schedule uses measured continuation pages with the source's paragraph fragments.
 """
 from hashlib import sha256
@@ -13,12 +14,12 @@ import re
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (
     ArrayObject, BooleanObject, DecodedStreamObject, DictionaryObject,
-    NameObject, TextStringObject, FloatObject, NumberObject, encode_pdfdocencoding,
+    NameObject, TextStringObject, FloatObject, NumberObject, ByteStringObject, ContentStream,
 )
 
 from residential_notice import NoticeInputError, REFERENCE_SHA256, fields_for_case
 
-PDF_TEMPLATE_VERSION = "residential-original-pdf-2026-10-27"
+PDF_TEMPLATE_VERSION = "residential-original-pdf-2026-10-28-format3"
 MASTER_SHA256 = "cf06f18af3bc79720a91a99afbcd84c5214aa613aa63608feb10508ff0ef989a"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-original.pdf"
 WIDTHS = json.loads((MASTER.parent / "residential-pdf-font-widths.json").read_text())
@@ -50,7 +51,7 @@ FIELD_MAP = {
 
 def _bytes(text):
     try:
-        return encode_pdfdocencoding(text)
+        return text.encode("cp1252")
     except UnicodeEncodeError as exc:
         raise NoticeInputError("A case field contains characters unavailable in the original form font; human review required") from exc
 
@@ -96,6 +97,10 @@ def _appearance(writer, widget, field, text, fonts):
         match = re.search(rb"([-\d.]+) ([-\d.]+) Td", old_ap.get_data())
         if match:
             baseline = float(match[2])
+    if field.get("/T") == "NAME OF PERSON SERVED":
+        # Align the entered date with both the fixed Date: caption and the
+        # signature caption, whose approved baseline is y=296.57 points.
+        baseline = 296.57 - y0
     parts = [f"/Tx BMC\nq\n1 1 {width-2:.6f} {height-2:.6f} re W n\nBT\n/{font} 12 Tf\n0 g\n"]
     for i, line in enumerate(lines):
         # Q=1 means centered within this fixed box, not centered on the page.
@@ -130,13 +135,37 @@ def _render_original(values, template_path=MASTER):
         raise RuntimeError("The approved PDF must have exactly two pages")
     form = writer._root_object["/AcroForm"]
     fonts = form["/DR"]["/Font"]
+    embedded = PdfReader(MASTER.parent / "residential-input-fonts.pdf")
+    for key in ("/TiRo", "/TiBo"):
+        fonts[NameObject(key)] = embedded.pages[0]["/Resources"]["/Font"][key].clone(writer)
+    # Correct only this heading's size/underline, leaving the approved body,
+    # page geometry and remaining fixed artwork untouched.
+    page = writer.pages[0]
+    page["/Resources"]["/Font"][NameObject("/AMBold12")] = fonts["/TiBo"]
+    stream = ContentStream(page.get_contents(), writer)
+    heading = False
+    changed = 0
+    operations = []
+    for operands, op in stream.operations:
+        if op == b"Td" and len(operands) == 2 and abs(float(operands[0])-179.905)<.001 and abs(float(operands[1])-469.549)<.001:
+            heading = True
+        if heading and op == b"Tj":
+            operations.extend([([NameObject("/AMBold12"), NumberObject(12)], b"Tf"), ([NumberObject(0)], b"Tw"),
+                               ([ByteStringObject(b"TIME PERIOD DUE")], b"Tj"),
+                               ([NameObject("/C2_0"), FloatObject(11.52)], b"Tf")])
+            heading = False
+            changed += 1
+        else:
+            operations.append((operands, op))
+    if changed != 1:
+        raise RuntimeError("Approved rent heading could not be identified")
+    stream.operations = operations
+    heading_stream = DecodedStreamObject()
+    end = 179.905 + _width("TIME PERIOD DUE", "TiBo")
+    heading_stream.set_data(stream.get_data() + f"\nq 0 G 0.6 w 179.905 467.2 m {end:.6f} 467.2 l S Q\n".encode())
+    page[NameObject("/Contents")] = writer._add_object(heading_stream)
     fields, seen = form["/Fields"], set()
     updated = {}
-    original_values = {}
-    for page in writer.pages:
-        for ref in page["/Annots"]:
-            widget = ref.get_object()
-            original_values[id(widget)] = str(widget.get("/Parent", widget).get_object().get("/V", ""))
     for page_no, page in enumerate(writer.pages, 1):
         for ref in page["/Annots"]:
             widget = ref.get_object()
@@ -150,7 +179,6 @@ def _render_original(values, template_path=MASTER):
             key = FIELD_MAP[(page_no, name)]
             seen.add((page_no, name))
             text = values[key]
-            old_value = original_values[id(widget)]
             field = parent
             parent_id = id(parent)
             if parent_id in updated and updated[parent_id] != text:
@@ -167,10 +195,12 @@ def _render_original(values, template_path=MASTER):
             field[NameObject("/V")] = TextStringObject(text)
             field[NameObject("/DV")] = TextStringObject(text)
             updated[parent_id] = text
-            # An unchanged value retains its appearance; new values use the
-            # original field's baseline, font, inset and alignment.
-            if text != old_value.strip() or not widget.get("/AP", {}).get("/N"):
-                _appearance(writer, widget, field, text, fonts)
+            # Every variable uses an embedded, actual Times New Roman face at
+            # 12pt, including a value identical to the original reference.
+            font = "TiBo" if key == "TOTAL_AMOUNT" else "TiRo"
+            field[NameObject("/DA")] = TextStringObject(f"/{font} 12 Tf 0 g")
+            widget[NameObject("/DA")] = TextStringObject(f"/{font} 12 Tf 0 g")
+            _appearance(writer, widget, field, text, fonts)
     if seen != set(FIELD_MAP):
         raise RuntimeError("Original PDF field map is incomplete")
     form[NameObject("/Fields")] = fields

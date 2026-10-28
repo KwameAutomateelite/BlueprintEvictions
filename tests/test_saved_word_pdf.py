@@ -45,7 +45,7 @@ def test_saved_editor_rent_revision_changes_both_pdf_columns_and_total():
                {"old": table["total"]["text"], "new": "$3,250.25", "paragraph_index": table["total"]["paragraph_index"]}]
     edited = patch_docx(raw, changes)
     fields = PdfReader(BytesIO(base64.b64decode(snapshot(edited)["pdf_base64"]))).get_fields()
-    assert fields["Month1"]["/V"] == "1/1/2026"
+    assert fields["Month1"]["/V"] == "January 1-31, 2026"
     assert fields["AmountDue1"]["/V"] == "$1,250.25"
     assert fields["TOTAL RENT DUE"]["/V"] == "$3,250.25"
     assert snapshot(edited)["pdf_sha256"] != snapshot(raw)["pdf_sha256"]

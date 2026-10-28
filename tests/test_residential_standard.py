@@ -91,7 +91,7 @@ def test_incomplete_inconsistent_or_overflowing_input_is_held(change):
 def test_unused_rows_stay_blank_and_stray_separator_is_removed():
     data = case(1); data["amounts_due"][0]["due_date"] = "; ; 8/15/2026"
     fields = fields_for_case(data)
-    assert fields["PERIOD_1"] == "8/15/2026"
+    assert fields["PERIOD_1"] == "August 1-31, 2026"
     assert fields["PERIOD_2"] == fields["AMOUNT_6"] == ""
 
 
@@ -118,7 +118,7 @@ def test_generate_endpoint_preserves_docx_and_attachment_headers():
         assert response.content[:2] == b"PK"
         assert "wordprocessingml.document" in response.headers["content-type"]
         assert response.headers["x-attachments-needed"] == "Sample required attachment"
-        assert response.headers["x-notice-template-version"] == "residential-pay-or-quit-2026-10-26-layout2"
+        assert response.headers["x-notice-template-version"] == "residential-pay-or-quit-2026-10-28-format3"
         data["total_amount_due"] = "1"
         held = client.post("/generate-notice", json=data)
         assert held.status_code == 422

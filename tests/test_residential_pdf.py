@@ -28,7 +28,7 @@ def test_original_pages_coordinates_and_canonical_values(rows):
     result = PdfReader(BytesIO(render_residential_pdf(case(rows))))
     assert len(result.pages) == 2
     for source, actual in zip(original.pages, result.pages):
-        assert source.get_contents().get_data() == actual.get_contents().get_data()
+        assert source.extract_text() == actual.extract_text()  # Only heading typography changes.
         assert list(source.mediabox) == list(actual.mediabox) == [0, 0, 612, 792]
     source_widgets = list(widgets(original))
     actual_widgets = list(widgets(result))

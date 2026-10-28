@@ -12,6 +12,7 @@ from lxml import etree
 from pypdf import PdfReader
 
 sys.path[:0] = [str(Path(__file__).parents[1]), str(Path(__file__).parents[1]/"revision-service"), str(Path(__file__).parent)]
+from notice_display import rent_period
 from residential_notice import fields_for_case, render_residential_notice, NoticeInputError
 from residential_pdf import MASTER, render_residential_pdf, _render_original
 from residential_pdf_flow import plan_pages, BODY_BOTTOM, ROW_LEADING, ROW_PADDING
@@ -42,7 +43,7 @@ def test_all_entries_stay_in_two_columns_with_one_reconciled_total(count):
     fields = reader.get_fields()
     assert len([k for k in fields if re.fullmatch(r"AmountDue\d+",k)]) == count
     for number,row in enumerate(data["amounts_due"],1):
-        assert fields[f"Month{number}"]["/V"] == row["due_date"]
+        assert fields[f"Month{number}"]["/V"] == rent_period(row["due_date"])
         assert fields[f"AmountDue{number}"]["/V"] == "$1,000.00"
     assert fields["TOTAL RENT DUE"]["/V"] == f"${count*1000:,.2f}"
     assert static_text(reader) == static_text(PdfReader(MASTER))
