@@ -51,7 +51,15 @@ def parse_rollout(raw):
     return SignatureRollout(d['profile'],None if cases is None else tuple(cases),None if signers is None else tuple(x.strip().lower() for x in signers),tuple(fields),mode)
 
 
-def load_rollout():
+def load_rollout(record_id=None):
+    # Keep designated rehearsal cases in provider test mode after live cutover.
+    test_raw = os.environ.get('SIGNATURE_TEST_ROLLOUT_POLICY')
+    if test_raw:
+        test = parse_rollout(test_raw)
+        if test.profile != 'kwame-test':
+            raise ValueError('Test override must be a bounded test profile')
+        if test.includes(record_id):
+            return test
     raw = os.environ.get('SIGNATURE_ROLLOUT_POLICY')
     if raw is None:
         raw = Path(__file__).with_name('signature-rollout.json').read_text()
