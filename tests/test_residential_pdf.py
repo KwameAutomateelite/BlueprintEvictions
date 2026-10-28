@@ -95,6 +95,11 @@ def test_pdf_api_and_existing_docx_contract(monkeypatch):
     monkeypatch.setenv("AIRTABLE_API_KEY", "local-test-no-network")
     from fastapi.testclient import TestClient
     import main
+    from unittest.mock import patch
+    # Other notice/signature routes call this existing synchronous helper.
+    # The additive endpoint must not shadow or change its calling convention.
+    with patch.object(main, "fill_template", return_value="/tmp/fictional.docx"), patch.object(main, "convert_docx_to_pdf", return_value="/tmp/fictional.pdf"), patch.object(main.os, "unlink"):
+        assert main.generate_notice_pdf("commercial", {}) == "/tmp/fictional.pdf"
     client = TestClient(main.app)
     data = case()
     data["attachments_required"] = ["TPO_Required_Attachment.pdf"]
