@@ -66,6 +66,7 @@ def child(before):
              jsonBody="={{ JSON.stringify({recipients:[{email:$('Validate Review Context').first().json.reviewer}],requireSignIn:true,sendInvitation:false,roles:['read'],retainInheritedPermissions:true}) }}"),
         code("Verify PDF Reviewer Access", "verify-access.js"),
         http("Recheck Saved Word Metadata", "={{ 'https://graph.microsoft.com/v1.0/me/drive/items/' + encodeURIComponent($('Validate Review Context').first().json.document_id) }}", credentials),
+        http("Read Address Folder Link", "={{ 'https://graph.microsoft.com/v1.0/me/drive/items/' + encodeURIComponent($('Validate Review Context').first().json.snapshot.context.case_folder_id) + '?$select=id,name,folder,webUrl,parentReference' }}", credentials),
         code("Return PDF Review Snapshot", "finish-preview.js"),
         code("Return Other Review Snapshot", text="""const s=$('Validate Review Context').first().json.snapshot;
 let r;try{r=$('Render Saved Word as Exact PDF').first().json;}catch{}

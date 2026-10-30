@@ -34,9 +34,21 @@ test('ready receipt requires saved PDF and actual content hashes',()=>{
  const code=fs.readFileSync(path.join(P,'review-receipt.js'),'utf8');const run=s=>new Function('$input',code)({first:()=>({json:s})});
  assert.throws(()=>run({context:{}}),/No ready PDF/);
  const out=run({context:{record_id:'rec12345678901234',onedrive_file_id:'WORD',review_pdf_file_id:'PDF',word_version:'etag1',
- review_format:'pdf',onedrive_share_link:'https://example.com/review.pdf',word_edit_link:'https://example.com/edit.docx',
+ case_folder_url:'https://example.com/address-folder',review_format:'pdf',onedrive_share_link:'https://example.com/review.pdf',word_edit_link:'https://example.com/edit.docx',
  review_pdf_sha256:'a'.repeat(64),review_docx_sha256:'b'.repeat(64)},renderedPayload:{amounts_due:Array(12).fill({})}})[0].json;
  assert.equal(out.state,'draft_ready_for_review');assert.equal(out.url,'https://example.com/review.pdf');assert.equal(out.rent_entry_count,12);
  for(const key of ['approved','signed','sent','notification_sent'])assert.equal(out[key],false);
  assert.equal(out.requires_fresh_approval,true);
+});
+
+test('QC receipt requires the verified address-folder link and returns three distinct destinations',()=>{
+ const code=fs.readFileSync(path.join(P,'review-receipt.js'),'utf8');const run=s=>new Function('$input',code)({first:()=>({json:s})});
+ const c={record_id:'rec12345678901234',case_name:'Example v Example',property_address:'123 Example St',case_folder_id:'CASE',
+ onedrive_file_id:'WORD',review_pdf_file_id:'PDF',word_version:'etag1',review_format:'pdf',
+ onedrive_share_link:'https://example.invalid/review.pdf',word_edit_link:'https://example.invalid/edit.docx',case_folder_url:'https://example.invalid/case-folder',
+ review_pdf_sha256:'a'.repeat(64),review_docx_sha256:'b'.repeat(64),review_pdf_name:'Case - REVIEW.pdf',word_edit_name:'draft.docx'};
+ const receipt=run({context:c})[0].json;
+ assert.equal(receipt.pdf_url,c.onedrive_share_link);assert.equal(receipt.word_edit_url,c.word_edit_link);assert.equal(receipt.folder_url,c.case_folder_url);
+ assert.equal(receipt.pdf_name,'Case - REVIEW.pdf');assert.match(receipt.presentation,/three clickable links/);
+ delete c.case_folder_url;assert.throws(()=>run({context:c}),/No ready PDF/);
 });
