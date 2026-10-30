@@ -70,3 +70,15 @@ def test_saved_edits_refresh_pdf_and_approval_cannot_bypass_pdf_checks():
     # Current loop item must be selected, rather than the first review iteration.
     assert "$('Build Approval Email').item" in nodes["Read Reviewed Exact PDF Bytes"]["parameters"]["url"]
     assert ".first()" not in nodes["Use Approved Exact PDF"]["parameters"]["jsCode"]
+
+
+def test_qc_folder_link_is_read_from_the_bound_address_folder_before_receipt():
+    child = builder.child(before())
+    nodes = {n['name']: n for n in child['nodes']}
+    folder = nodes['Read Address Folder Link']
+    assert folder['type'] == 'n8n-nodes-base.httpRequest'
+    assert folder['parameters'].get('method', 'GET') == 'GET'
+    assert 'snapshot.context.case_folder_id' in folder['parameters']['url']
+    assert child['connections']['Recheck Saved Word Metadata']['main'][0] == [builder.edge('Read Address Folder Link')]
+    assert child['connections']['Read Address Folder Link']['main'][0] == [builder.edge('Return PDF Review Snapshot')]
+    assert "folder.id !== expected.snapshot.context.case_folder_id" in nodes['Return PDF Review Snapshot']['parameters']['jsCode']

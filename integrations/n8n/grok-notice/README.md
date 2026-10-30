@@ -36,3 +36,9 @@ Draft & Review, version febec03b-26c5-4442-98d7-dfe5a67d81f5, adapted only to pu
 function parameters and exports. No historical rehearsal case restrictions or
 model-generated values are used. The generator continues to validate all fields
 and total amounts independently.
+
+October 30 quality-control display
+
+The shared exact-PDF helper gives newly saved review PDFs readable case/street/date/REVIEW names with the original source-hash suffix. It reads the actual bound address-folder metadata before returning its URL. Grok draft/refresh receipts include three explicit destinations: `pdf_url`, `word_edit_url`, and `folder_url`, along with the actual saved names and case/address. A review filename never indicates approval or signing.
+
+Storage IDs, upload destinations, source-Word names/idempotency, existing case links, old files and approval byte/hash checks remain unchanged. The extra folder read validates the link; it does not create, move or rename a folder. Historical files in older/shared locations need individual reconciliation and are outside this display change.
