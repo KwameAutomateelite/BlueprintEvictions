@@ -68,13 +68,22 @@ def test_every_bound_word_variable_uses_times_new_roman_12():
         if marks:
             bindings[marks[0]] = [i for i, run in enumerate(paragraph.runs) if '{{' in run.text]
     matching = 0
-    for paragraph in doc.paragraphs:
+    from docx.text.paragraph import Paragraph
+    for node in doc.element.iter(qn('w:p')):
+        paragraph=Paragraph(node,doc._body)
         marks = [b.get(qn('w:name')) for b in paragraph._p.iter(qn('w:bookmarkStart'))]
         if not marks:
             continue
         key = marks[0]
         if key.startswith('BE_RENT_ROW_'):
-            key = 'BE_RENT_ROW_6'
+            # Overflow rent now uses real cells rather than tab alignment.
+            for cell in paragraph._p.getparent().getparent().findall(qn('w:tc')):
+                for value in cell.iter(qn('w:p')):
+                    for run in Paragraph(value,doc._body).runs:
+                        assert run.font.name == 'Times New Roman'
+                        assert run.font.size.pt == 12
+                        matching += 1
+            continue
         for index in bindings.get(key, []):
             run = paragraph.runs[index]
             assert run.font.name == 'Times New Roman'

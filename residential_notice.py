@@ -12,7 +12,7 @@ from docx import Document
 from docx.shared import Pt
 from notice_display import address_display, display_inputs
 
-TEMPLATE_VERSION = "residential-pay-or-quit-2026-10-28-format3"
+TEMPLATE_VERSION = "residential-pay-or-quit-2026-10-30-word-layout4"
 REFERENCE_SHA256 = "0e23f57004a2f9842acaab92a334d46c031a5d09e31f4f3900b91f531418825d"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-2026-10.docx"
 FIXED_RENT_ROWS = 6
@@ -256,6 +256,9 @@ def render_residential_notice(data, template_path=MASTER):
                 run.font.size = Pt(12)
     if seen != set(fields):
         raise RuntimeError("Approved master field map is incomplete")
+    from residential_word_layout import needs_flow, apply_flow_layout
+    if needs_flow(fields, len(data['amounts_due'])):
+        apply_flow_layout(doc, fields, len(data['amounts_due']))
     doc.core_properties.identifier = TEMPLATE_VERSION
     out = BytesIO()
     doc.save(out)

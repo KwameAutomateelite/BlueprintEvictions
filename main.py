@@ -2080,6 +2080,20 @@ async def render_saved_notice_pdf(req: SavedNoticePdfRequest):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@app.post("/normalize-saved-notice-word")
+async def normalize_saved_notice_word(req: SavedNoticePdfRequest):
+    """Restore the standard Word layout after a validated, hash-bound edit."""
+    import base64
+    import binascii
+    from residential_notice import NoticeInputError
+    from residential_word_snapshot import normalize_saved_word
+    try:
+        source = base64.b64decode(req.docx_base64, validate=True)
+        return normalize_saved_word(source, req.expected_sha256)
+    except (NoticeInputError, binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.post("/generate-notice-pdf")
 async def generate_original_notice_pdf(req: GenerateNoticeRequest):
     """Fill the original residential form and paginate overflowing rent safely."""
