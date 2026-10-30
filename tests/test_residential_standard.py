@@ -118,7 +118,7 @@ def test_generate_endpoint_preserves_docx_and_attachment_headers():
         assert response.content[:2] == b"PK"
         assert "wordprocessingml.document" in response.headers["content-type"]
         assert response.headers["x-attachments-needed"] == "Sample required attachment"
-        assert response.headers["x-notice-template-version"] == "residential-pay-or-quit-2026-10-28-format3"
+        assert response.headers["x-notice-template-version"] == "residential-pay-or-quit-2026-10-30-word-layout4"
         data["total_amount_due"] = "1"
         held = client.post("/generate-notice", json=data)
         assert held.status_code == 422

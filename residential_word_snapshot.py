@@ -14,6 +14,7 @@ from docx import Document
 from residential_notice import MASTER as WORD_MASTER, MAX_RENT_ROWS, NoticeInputError
 from residential_pdf import PDF_TEMPLATE_VERSION, render_residential_pdf
 from notice_display import display_inputs
+from notice_word_rows import inspect_rows, canonical_paragraphs
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 STATIC_FIELD_NAMES = {
@@ -70,27 +71,35 @@ def saved_word_case(content):
         return None
     rent_names = {k for k in bindings if re.fullmatch(r"RENT_ROW_[1-9][0-9]*", k)}
     row_count = len(rent_names)
-    if (not 6 <= row_count <= MAX_RENT_ROWS or
+    parts = {k for k in bindings if re.fullmatch(r"RENT_PART_[1-9][0-9]*_([2-9]|[1-9][0-9]+)(_NOSPACE)?", k)}
+    if (not 1 <= row_count <= MAX_RENT_ROWS or
             rent_names != {f"RENT_ROW_{i}" for i in range(1, row_count + 1)} or
-            set(bindings) != STATIC_FIELD_NAMES | rent_names or
+            set(bindings) != STATIC_FIELD_NAMES | rent_names | parts or
             not identifier.startswith("residential-pay-or-quit-")):
         raise NoticeInputError("Saved residential Word form lost its field bindings; fresh review required")
     master = Document(WORD_MASTER)
     expected = _bindings(master)
-    a, b = list(master.element.iter(W + "p")), list(doc.element.iter(W + "p"))
-    extra_indices = {bindings[f"RENT_ROW_{i}"][0] for i in range(7, row_count + 1)}
-    reduced = [p for i, p in enumerate(b) if i not in extra_indices]
-    # Extra rows must be consecutive, directly after row six. Removing only
-    # those rows must restore the exact master paragraph/field ordering.
-    first = bindings["RENT_ROW_1"][0]
-    if (len(a) != len(reduced) or any(bindings[f"RENT_ROW_{i}"][0] != first + i - 1 for i in range(1, row_count + 1)) or
-            any(bindings[k][1] not in reduced or reduced.index(bindings[k][1]) != expected[k][0]
+    try:
+        rent_rows = inspect_rows(doc.element)
+        a, reduced = canonical_paragraphs(master.element), canonical_paragraphs(doc.element)
+    except ValueError as exc:
+        raise NoticeInputError(str(exc)) from exc
+    # Generated page artwork/rent headers can repeat; the complete ordered
+    # boilerplate and all non-rent field positions must still match the master.
+    if (len(a) != len(reduced) or
+            any(bindings[k][1] not in reduced or reduced.index(bindings[k][1]) != a.index(expected[k][1])
                 for k in STATIC_FIELD_NAMES)):
         raise NoticeInputError("Saved Word form structure changed; regenerate the review copy")
     total = _total(doc)
+    raw_paragraphs=list(doc.element.iter(W+'p'))
+    first_row=min(part['period_paragraph_index'] for row in rent_rows for part in row['parts'])
+    last_row=max(part['paragraph_index'] for row in rent_rows for part in row['parts'])
+    intro=next((i for i,p in enumerate(raw_paragraphs) if _text(p).startswith('PLEASE TAKE NOTICE')),None)
+    if intro is None or not intro < first_row <= last_row < raw_paragraphs.index(total):
+        raise NoticeInputError('Saved rent schedule moved outside its approved position')
     if total not in reduced:
         raise NoticeInputError("Saved Word total moved into a rent row; regenerate the review copy")
-    allowed = {i for i, _ in expected.values()} | {reduced.index(total)}
+    allowed = {a.index(expected[k][1]) for k in STATIC_FIELD_NAMES} | {reduced.index(total)}
     if any(_text(x) != _text(y) for i, (x, y) in enumerate(zip(a, reduced)) if i not in allowed):
         raise NoticeInputError("Saved Word boilerplate changed; human review required")
     values = {k: _text(p).strip() for k, (_, p) in bindings.items()}
@@ -105,16 +114,8 @@ def saved_word_case(content):
     if not values["PROVIDER_PHONE"].startswith("Phone: "):
         raise NoticeInputError("Saved housing-provider phone label changed")
     rows, blank = [], False
-    for i in range(1, row_count + 1):
-        p = bindings[f"RENT_ROW_{i}"][1]
-        tokens = [""]
-        for n in p.iter():
-            if n.tag == W + "t":
-                tokens[-1] += n.text or ""
-            elif n.tag == W + "tab" and n.getparent().tag == W + "r":
-                tokens.append("")
-        if len(tokens) != 2:
-            raise NoticeInputError("Saved rent period and amount must remain separate columns")
+    for row in rent_rows:
+        tokens = [row['period'], row['amount']]
         if not any(tokens):
             blank = True
         elif blank or not all(tokens):
@@ -156,3 +157,28 @@ def render_saved_word_pdf(content, expected_sha256):
             "case_fields": case,
             "pdf_base64": base64.b64encode(pdf).decode("ascii"),
             "pdf_sha256": sha256(pdf).hexdigest()}
+
+
+def normalize_saved_word(content, expected_sha256):
+    """Reapply the current Word layout after a validated case-field edit.
+
+    Existing callers still bind the conditional upload to the original saved
+    item/version. This transforms bytes only; it cannot save, approve or send.
+    """
+    digest=sha256(content).hexdigest()
+    if digest != expected_sha256:
+        raise NoticeInputError('Saved Word source hash changed; fresh review required')
+    case=saved_word_case(content)
+    if case is None:
+        return {'is_standard':False,'source_docx_sha256':digest}
+    from residential_notice import render_residential_notice, TEMPLATE_VERSION
+    import base64
+    corrected=render_residential_notice(case)
+    normalized=saved_word_case(corrected)
+    if display_inputs(normalized) != display_inputs(case):
+        raise NoticeInputError('Word layout correction changed the notice fields')
+    return {'is_standard':True,'source_docx_sha256':digest,
+            'word_template_version':TEMPLATE_VERSION,
+            'docx_base64':base64.b64encode(corrected).decode('ascii'),
+            'docx_sha256':sha256(corrected).hexdigest(),
+            'printed_signer':{'name':normalized['signer_name'],'title':normalized['signer_title']}}

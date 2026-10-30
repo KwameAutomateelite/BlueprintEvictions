@@ -1,10 +1,12 @@
 """Read and protect the approved fixed-position residential form during edits.
 
-Bookmarks bind fields to paragraphs. No layout or boilerplate is regenerated.
+Bookmarks bind editable fields to paragraphs and rent-table cells.
+The patch validates content first; the central renderer then restores layout.
 """
 import re
 import unicodedata
 from lxml import etree
+from notice_word_rows import inspect_rows
 
 W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 WIDTHS = {'TENANT_NAMES': 480, 'PROPERTY_STREET': 445, 'PROPERTY_CITY': 445,
@@ -66,27 +68,9 @@ def total_cell(root):
 def inspect_standard(root):
     b = bindings(root)
     rows, blank_seen = [], False
-    rent_names = {k for k in b if k.startswith('BE_RENT_ROW_')}
-    count = len(rent_names)
-    if not 6 <= count <= 1000 or rent_names != {'BE_RENT_ROW_'+str(i) for i in range(1, count+1)}:
-        raise ValueError('Rent row bindings are missing, repeated or out of sequence')
-    first = b['BE_RENT_ROW_1'][0]
-    if any(b['BE_RENT_ROW_'+str(i)][0] != first+i-1 for i in range(1,count+1)):
-        raise ValueError('Rent row order changed')
-    for n in range(1, count+1):
-        i, p = b['BE_RENT_ROW_'+str(n)]
-        tokens = []
-        current = ''
-        for node in p.iter():
-            if node.tag == W+'t':
-                current += node.text or ''
-            elif node.tag == W+'tab' and node.getparent().tag == W+'r':
-                tokens.append(current)
-                current = ''
-        tokens.append(current)
-        if len(tokens) != 2:
-            raise ValueError('Fixed-form rent columns changed')
-        period, amount = tokens
+    for row in inspect_rows(root):
+        i, p = row['paragraph_index'], row['p']
+        period, amount = row['period'], row['amount']
         if not period and not amount:
             blank_seen = True
             continue
@@ -136,6 +120,8 @@ def validate_edit(before, after):
         return
     fields = bindings(before)
     allowed = {i for k, (i, p) in fields.items() if k[3:] in WIDTHS or k.startswith('BE_RENT_ROW_')}
+    allowed.update(part['period_paragraph_index'] for row in inspect_rows(before) for part in row['parts'])
+    allowed.update(part['paragraph_index'] for row in inspect_rows(before) for part in row['parts'])
     allowed.add(total_cell(before)['paragraph_index'])
     a, b = list(before.iter(W+'p')), list(after.iter(W+'p'))
     if len(a) != len(b):

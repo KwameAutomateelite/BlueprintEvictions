@@ -81,3 +81,11 @@ rendered on both pages to compare with the approved form.
 Generate local review copies with `tools/preview_residential_standard.py`.
 No production case, bot message, signing request or paid service is used by
 these tests.
+
+## Word pagination correction October 30
+
+The Word editing copy now shares the exact PDF overflow page plan. When the rent list exceeds the original boxes, periods and amounts use separate Word table cells at 12pt Times New Roman. Column headings repeat on continuation pages, the final rent row stays with the total, and whole boilerplate/signature/contact sections move to the same pages as the PDF. Short notices retain the approved six-box layout.
+
+Word version: `residential-pay-or-quit-2026-10-30-word-layout4`. The approved PDF template/version is unchanged. Both legacy tab-based Word copies and new table-based copies remain readable/editable; malformed or unbound rows, moved rent schedules, changed boilerplate and unreconciled totals are held for review. Existing stored documents are not silently migrated.
+
+After a validated edit, the revision service sends the patched bytes and hash to `/normalize-saved-notice-word`, then verifies the returned bytes/hash. The central generator reapplies the Word page plan from the actual edited fields. The existing conditional OneDrive upload still uses the original source version. This also corrects the layout of an older standard Word file when it is edited, without migrating untouched documents. If normalization is unavailable or fails validation, the edit is held before saving.

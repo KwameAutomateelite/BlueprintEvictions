@@ -224,11 +224,8 @@ def render_residential_pdf(data, template_path=MASTER):
     # The six original boxes have slightly different measured widths. Keep
     # short notices byte-for-byte on that original path; long labels or lists
     # use the same artwork and paragraph fragments with measured pagination.
-    widths = (163.379, 159.536, 163.537, 163.379, 159.536, 163.537)
-    overflow = rows > 6 or any(
-        _width(values[f"PERIOD_{i}"], "TiRo") > widths[i-1]-4 or
-        _width(values[f"AMOUNT_{i}"], "TiRo") > 71.636
-        for i in range(1, min(rows, 6)+1))
+    from residential_word_layout import needs_flow
+    overflow = needs_flow(values, rows)
     if not overflow:
         return _render_original(values, template_path)
     base_values = dict(values)

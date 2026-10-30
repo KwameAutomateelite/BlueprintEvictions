@@ -18,3 +18,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY templates/ templates/
 COPY attachments/ attachments/
 COPY main.py notice_display.py residential_notice.py residential_pdf.py residential_pdf_flow.py residential_word_snapshot.py retainer_draft.py retainer_routes.py signature_bridge.py signature_callback_service.py signature_integrity.py signature_rollout.py signature_rollover*.py signature-rollout.json ./
+COPY residential_word_layout.py notice_word_rows.py ./
