@@ -32,6 +32,19 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Blueprint Evictions - Dropbox Sign Service", version="2.1.0")
 
+
+@app.middleware('http')
+async def authenticate_signature_send(request: Request, call_next):
+    if request.url.path == '/send-signature':
+        import hmac
+        secret = os.environ.get('SIGNATURE_STORAGE_BRIDGE_SECRET', '')
+        supplied = request.headers.get('x-maddy-signature-key', '')
+        if not secret or not hmac.compare_digest(secret, supplied):
+            return Response(content='Signature authentication required', status_code=401)
+    return await call_next(request)
+from retainer_routes import router as retainer_router
+app.include_router(retainer_router)
+
 # --- Config ---
 
 print("STARTUP: reading env vars...", flush=True)
@@ -70,6 +83,7 @@ NOTICE_TEMPLATES = {
 class SendSignatureRequest(BaseModel):
     require_verified_signature: bool = False
     approved_pdf_sha256: Optional[str] = None
+    authorized_test_cycle: Optional[str] = None
     signer_email: str
     signer_name: str
     document_name: str
@@ -119,6 +133,16 @@ class GenerateNoticeRequest(BaseModel):
     landlord_state: str = ""
     landlord_zip: str = ""
     notice_date: str = ""
+    # Approved residential form separates payee, signer and provider contacts.
+    payment_recipient_name: str = ""
+    payment_address_street: str = ""
+    payment_address_city: str = ""
+    payment_phone: str = ""
+    signer_name: str = Field(default="", validation_alias=AliasChoices("signer_name", "authorized_signer_name"))
+    signer_title: str = Field(default="", validation_alias=AliasChoices("signer_title", "authorized_signer_title"))
+    housing_provider_street: str = ""
+    housing_provider_city: str = ""
+    housing_provider_phone: str = ""
     case_name: str = ""
     notice_header: str = ""  # Override for notice header text; defaults based on day_count
     is_section_8: bool = False
@@ -533,7 +557,10 @@ def merge_attachment_pdfs(notice_pdf_path: str, attachment_filenames: List[str])
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "dropbox-sign-service"}
+    from residential_notice import TEMPLATE_VERSION
+    from residential_pdf import PDF_TEMPLATE_VERSION
+    from residential_pdf_flow import RENDERER_VERSION
+    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True, "residential_rent_pagination": RENDERER_VERSION}
 
 
 @app.get("/debug-template")
@@ -674,7 +701,7 @@ async def send_signature(req: SendSignatureRequest):
     approval_url = os.environ.get("SIGNATURE_APPROVAL_BRIDGE_URL", "")
     from signature_rollout import load_rollout
     try:
-        rollout = load_rollout()
+        rollout = load_rollout(req.record_id)
     except (ValueError, OSError):
         raise HTTPException(status_code=503, detail="Signing rollout configuration is invalid")
     in_verified_scope = rollout.includes(req.record_id)
@@ -722,7 +749,7 @@ async def send_signature(req: SendSignatureRequest):
                         storage_url=os.environ.get('SIGNATURE_ROLLOVER_STORAGE_URL', ''),
                         secret=os.environ['SIGNATURE_STORAGE_BRIDGE_SECRET'],
                         provider_key=os.environ.get('DROPBOX_SIGN_API_KEY', ''),
-                        request={'record_id':req.record_id, 'approved_document_sha256':approval_context['approved_document_sha256'], 'test_mode':True},
+                        request={'record_id':req.record_id, 'approved_document_sha256':approval_context['approved_document_sha256'], 'test_mode':True, 'authorized_test_cycle':getattr(req, 'authorized_test_cycle', None)},
                         signer_email=req.signer_email,
                         expected_folder=approval_context['folder_id'],
                         expected_status=approval_context['expected_status'])
@@ -833,11 +860,11 @@ async def signature_callback(request: Request):
     # Controlled rollout: existing non-test case handling is preserved.
     bridge_url = os.environ.get("SIGNATURE_STORAGE_BRIDGE_URL", "")
     from signature_rollout import load_rollout
+    callback_record = (payload.get("signature_request", {}).get("metadata") or {}).get("record_id")
     try:
-        rollout = load_rollout()
+        rollout = load_rollout(callback_record)
     except (ValueError, OSError):
         raise HTTPException(status_code=503, detail="Signing rollout configuration is invalid")
-    callback_record = (payload.get("signature_request", {}).get("metadata") or {}).get("record_id")
     if bridge_url and rollout.includes(callback_record):
         from signature_callback_service import process_signature_callback
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as provider_client, httpx.AsyncClient(timeout=60) as storage_client, httpx.AsyncClient(timeout=30, headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"}) as airtable_client:
@@ -2034,10 +2061,83 @@ def _underline_notice_recipients(doc):
             offset = end
 
 
+class SavedNoticePdfRequest(BaseModel):
+    docx_base64: str = Field(max_length=6_000_000)
+    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@app.post("/render-saved-notice-pdf")
+async def render_saved_notice_pdf(req: SavedNoticePdfRequest):
+    """Produce the exact PDF from the actual saved Word editing snapshot."""
+    import base64
+    import binascii
+    from residential_notice import NoticeInputError
+    from residential_word_snapshot import render_saved_word_pdf
+    try:
+        source = base64.b64decode(req.docx_base64, validate=True)
+        return render_saved_word_pdf(source, req.expected_sha256)
+    except (NoticeInputError, binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/normalize-saved-notice-word")
+async def normalize_saved_notice_word(req: SavedNoticePdfRequest):
+    """Restore the standard Word layout after a validated, hash-bound edit."""
+    import base64
+    import binascii
+    from residential_notice import NoticeInputError
+    from residential_word_snapshot import normalize_saved_word
+    try:
+        source = base64.b64decode(req.docx_base64, validate=True)
+        return normalize_saved_word(source, req.expected_sha256)
+    except (NoticeInputError, binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/generate-notice-pdf")
+async def generate_original_notice_pdf(req: GenerateNoticeRequest):
+    """Fill the original residential form and paginate overflowing rent safely."""
+    from residential_notice import NoticeInputError, REFERENCE_SHA256
+    from residential_pdf import PDF_TEMPLATE_VERSION, render_residential_pdf
+    try:
+        content = render_residential_pdf(req.model_dump())
+    except NoticeInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    safe_name = re.sub(r'[\x00-\x1f\x7f"\\/]', '', req.case_name or "Notice")
+    safe_name = safe_name.encode("ascii", "replace").decode("ascii")[:120]
+    headers = {
+        "Content-Disposition": f'attachment; filename="3-Day Notice - {safe_name}.pdf"',
+        "X-Notice-Template-Version": PDF_TEMPLATE_VERSION,
+        "X-Notice-Template-SHA256": REFERENCE_SHA256,
+    }
+    if req.attachments_required:
+        headers["X-Attachments-Needed"] = ",".join(req.attachments_required)
+    return Response(content=content, media_type="application/pdf", headers=headers)
+
+
 @app.post("/generate-notice")
 async def generate_notice(req: GenerateNoticeRequest):
     """Generate a filled .docx eviction notice from template and return it."""
     logger.info(f"generate-notice: type={req.notice_type} day_count={req.day_count} case={req.case_name}")
+
+    if req.notice_type == "residential" and req.day_count == 3:
+        from residential_notice import NoticeInputError, TEMPLATE_VERSION, render_residential_notice
+        try:
+            content = render_residential_notice(req.model_dump())
+        except NoticeInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # Preserve the endpoint's DOCX contract and attachment-rule headers.
+        safe_name = re.sub(r'[\x00-\x1f\x7f"\\/]', '', req.case_name or "Notice")
+        safe_name = safe_name.encode("ascii", "replace").decode("ascii")[:120]
+        headers = {
+            "Content-Disposition": f'attachment; filename="3-Day Notice - {safe_name}.docx"',
+            "X-Notice-Template-Version": TEMPLATE_VERSION,
+        }
+        if req.attachments_required:
+            headers["X-Attachments-Needed"] = ",".join(req.attachments_required)
+        return Response(content=content,
+                        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        headers=headers)
 
     # Validate day count
     if req.day_count not in DAY_COUNT_WORDS:
