@@ -30,6 +30,7 @@ def long_case(count):
 
 def static_text(reader):
     text = "".join(page.extract_text() for page in reader.pages)
+    text = text.replace("DV specified EHORZ\x1d", "as specified below:")
     # Column headings repeat when the rent table continues onto a new page.
     for heading in ["TIME PERIOD DUE", "AMOUNT DUE"]:
         text = text.replace(heading, "")

@@ -19,7 +19,7 @@ from pypdf.generic import (
 
 from residential_notice import NoticeInputError, REFERENCE_SHA256, fields_for_case
 
-PDF_TEMPLATE_VERSION = "residential-original-pdf-2026-10-28-format3"
+PDF_TEMPLATE_VERSION = "residential-original-pdf-2026-11-02-font4"
 MASTER_SHA256 = "cf06f18af3bc79720a91a99afbcd84c5214aa613aa63608feb10508ff0ef989a"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-original.pdf"
 WIDTHS = json.loads((MASTER.parent / "residential-pdf-font-widths.json").read_text())
@@ -120,6 +120,32 @@ def _appearance(writer, widget, field, text, fonts):
     widget[NameObject("/AP")] = DictionaryObject({NameObject("/N"): writer._add_object(ap)})
 
 
+def _embed_original_cid_font(writer, page, fonts):
+    """Supply the original form's missing font, preserving its glyph positions.
+
+    The source's short 'as specified below:' edit uses Identity-H glyph IDs
+    without an embedded font or Unicode map. Substitution renders those IDs
+    as unrelated letters in some viewers. Reuse the already embedded full TNR
+    face; its original glyph IDs and the source widths remain unchanged.
+    """
+    font = page["/Resources"]["/Font"]["/C2_2"]
+    if font.get("/BaseFont") != "/TimesNewRoman" or font.get("/Encoding") != "/Identity-H":
+        raise RuntimeError("Original CID font changed; do not substitute another face")
+    descendant = font["/DescendantFonts"][0].get_object()
+    descendant["/FontDescriptor"][NameObject("/FontFile2")] = fonts["/TiRo"]["/FontDescriptor"].raw_get("/FontFile2")
+    descendant[NameObject("/CIDToGIDMap")] = NameObject("/Identity")
+    glyphs = {3: " ", 29: ":", 68: "a", 69: "b", 72: "e", 79: "l", 82: "o", 86: "s", 90: "w"}
+    rows = [f"<{gid:04x}> <{char.encode('utf-16-be').hex()}>" for gid, char in glyphs.items()]
+    cmap = DecodedStreamObject()
+    cmap.set_data(("/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /OriginalTNR def /CMapType 2 def\n"
+        "1 begincodespacerange <0000> <ffff> endcodespacerange\n"
+        + str(len(rows)) + " beginbfchar\n" + "\n".join(rows)
+        + "\nendbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end\n").encode("ascii"))
+    font[NameObject("/ToUnicode")] = writer._add_object(cmap.flate_encode())
+
+
 def _render_original(values, template_path=MASTER):
     source = Path(template_path).read_bytes()
     if sha256(source).hexdigest() != MASTER_SHA256:
@@ -141,6 +167,7 @@ def _render_original(values, template_path=MASTER):
     # Correct only this heading's size/underline, leaving the approved body,
     # page geometry and remaining fixed artwork untouched.
     page = writer.pages[0]
+    _embed_original_cid_font(writer, page, fonts)
     page["/Resources"]["/Font"][NameObject("/AMBold12")] = fonts["/TiBo"]
     stream = ContentStream(page.get_contents(), writer)
     heading = False

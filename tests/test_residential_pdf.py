@@ -28,7 +28,8 @@ def test_original_pages_coordinates_and_canonical_values(rows):
     result = PdfReader(BytesIO(render_residential_pdf(case(rows))))
     assert len(result.pages) == 2
     for source, actual in zip(original.pages, result.pages):
-        assert source.extract_text() == actual.extract_text()  # Only heading typography changes.
+        expected = source.extract_text().replace("DV specified EHORZ\x1d", "as specified below:")
+        assert expected == actual.extract_text()  # Restore the source's missing CID font map.
         assert list(source.mediabox) == list(actual.mediabox) == [0, 0, 612, 792]
     source_widgets = list(widgets(original))
     actual_widgets = list(widgets(result))
@@ -46,6 +47,25 @@ def test_original_pages_coordinates_and_canonical_values(rows):
     for i in range(rows + 1, 7):
         assert canonical[f"Month{i}"]["/V"] == canonical[f"AmountDue{i}"]["/V"] == ""
     assert result.metadata["/NoticeTemplateVersion"] == PDF_TEMPLATE_VERSION
+
+
+@pytest.mark.parametrize("rows", [1, 6, 12, 60])
+def test_original_identity_font_is_embedded_without_substitution(rows):
+    result = PdfReader(BytesIO(render_residential_pdf(case(rows))), strict=True)
+    assert "as specified below:" in result.pages[0].extract_text()
+    for page in result.pages:
+        resources = page["/Resources"]
+        sources = [resources]
+        sources += [obj.get_object().get("/Resources", {}) for obj in resources.get("/XObject", {}).values()]
+        for resource in sources:
+            for ref in resource.get("/Font", {}).values():
+                font = ref.get_object()
+                if font.get("/BaseFont") != "/TimesNewRoman":
+                    continue
+                descendant = font["/DescendantFonts"][0].get_object()
+                assert len(descendant["/FontDescriptor"]["/FontFile2"].get_data()) > 10000
+                assert descendant["/CIDToGIDMap"] == "/Identity"
+                assert b"<0044> <0061>" in font["/ToUnicode"].get_data()
 
 
 def test_both_linked_contact_appearances_update_and_can_differ():
