@@ -153,6 +153,7 @@ def render_saved_word_pdf(content, expected_sha256):
     pdf = render_residential_pdf(case)
     import base64
     return {"is_standard": True, "source_docx_sha256": digest,
+            "word_template_version": Document(BytesIO(content)).core_properties.identifier,
             "template_version": PDF_TEMPLATE_VERSION,
             "case_fields": case,
             "pdf_base64": base64.b64encode(pdf).decode("ascii"),

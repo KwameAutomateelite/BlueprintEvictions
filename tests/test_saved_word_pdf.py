@@ -51,6 +51,18 @@ def test_saved_editor_rent_revision_changes_both_pdf_columns_and_total():
     assert snapshot(edited)["pdf_sha256"] != snapshot(raw)["pdf_sha256"]
 
 
+@pytest.mark.parametrize("version", ["residential-pay-or-quit-2026-10-30-word-layout4",
+                                     "residential-pay-or-quit-historical-layout"])
+def test_review_receipt_reports_actual_saved_word_identifier(version):
+    doc = Document(BytesIO(render_residential_notice(case())))
+    doc.core_properties.identifier = version
+    out = BytesIO(); doc.save(out)
+    raw = out.getvalue()
+    result = snapshot(raw)
+    assert result["word_template_version"] == version
+    assert result["source_docx_sha256"] == sha256(raw).hexdigest()
+
+
 def test_saved_county_and_signer_edits_are_not_overwritten_by_cached_inputs():
     raw = render_residential_notice(case())
     edited = patch_docx(raw, [{"old": "COUNTY OF SANTA CLARA", "new": "COUNTY OF SAN MATEO"},
