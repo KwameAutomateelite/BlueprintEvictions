@@ -60,6 +60,8 @@ def test_original_identity_font_is_embedded_without_substitution(rows):
         for resource in sources:
             for ref in resource.get("/Font", {}).values():
                 font = ref.get_object()
+                if font.get("/BaseFont") == "/TimesNewRomanPSMT" and font.get("/Subtype") == "/TrueType":
+                    assert len(font["/FontDescriptor"]["/FontFile2"].get_data()) > 10000
                 if font.get("/BaseFont") != "/TimesNewRoman":
                     continue
                 descendant = font["/DescendantFonts"][0].get_object()

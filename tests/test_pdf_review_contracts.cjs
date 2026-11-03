@@ -9,7 +9,7 @@ const hash = b => crypto.createHash('sha256').update(b).digest('hex');
 const pdf = Buffer.from('%PDF-fictional-review-contract-fixture');
 const sourceHash = hash(Buffer.from('fictional Word'));
 const snapshot = () => ({fields:{Record_ID:'QA-ONLY'},renderedPayload:{notice_type:'residential',day_count:3,total_amount_due:'1000'},context:{record_id:'QA-ONLY',onedrive_file_id:'WORD-1',case_folder_id:'CASE-1',runtime_policy:{enabled:true,reviewer_email:'reviewer@example.invalid',reviewer_senders:['reviewer@example.invalid'],signing_enabled:false},attachments_required:['TPO_Required_Attachment.pdf']}});
-const result = () => ({is_standard:true,source_docx_sha256:sourceHash,template_version:'residential-original-pdf-2026-11-02-font4',pdf_base64:pdf.toString('base64'),pdf_sha256:hash(pdf),case_fields:{notice_date:'10/30/26',tenant_names:'Fictional Tenant',property_address_street:'123 Example St',property_address_city:'Sunnyvale, CA 94086',county:'SANTA CLARA',payment_recipient_name:'Fictional Owner',payment_phone:'(408) 555-0100',total_amount_due:'1250.25',amounts_due:[{due_date:'October 2026',amount:'1250.25'}],signer_name:'Pat Example',signer_title:'Property Manager'}});
+const result = () => ({is_standard:true,source_docx_sha256:sourceHash,template_version:'residential-original-pdf-2026-11-03-font5',pdf_base64:pdf.toString('base64'),pdf_sha256:hash(pdf),case_fields:{notice_date:'10/30/26',tenant_names:'Fictional Tenant',property_address_street:'123 Example St',property_address_city:'Sunnyvale, CA 94086',county:'SANTA CLARA',payment_recipient_name:'Fictional Owner',payment_phone:'(408) 555-0100',total_amount_due:'1250.25',amounts_due:[{due_date:'October 2026',amount:'1250.25'}],signer_name:'Pat Example',signer_title:'Property Manager'}});
 async function run(file, input, refs={}, binary=pdf) {
   const code=fs.readFileSync(path.join(dir,file),'utf8');
   const $=name=>({first:()=>{if(!(name in refs))throw Error('Node not executed');return {json:refs[name]};},get item(){if(!(name in refs))throw Error('Node not executed');return {json:refs[name]};}});
@@ -43,10 +43,10 @@ test('PDF preparation binds the saved Word source, PDF bytes and template versio
 });
 
 test('embedded-font format is accepted without weakening Word/PDF hash checks', async()=>{
- const r=result();r.template_version='residential-original-pdf-2026-11-02-font4';
+ const r=result();r.template_version='residential-original-pdf-2026-11-03-font5';
  const nodes={'Prepare Saved Word Snapshot':{expected_sha256:sourceHash},'Validate Review Context':{snapshot:snapshot()}};
  const out=await run('prepare-pdf.js',r,nodes);
- assert.equal(out[0].json.name,'3-Day Notice - 123 Example St - 2026-10-30 - REVIEW - font4 - '+sourceHash.slice(0,16)+'.pdf');
+ assert.equal(out[0].json.name,'3-Day Notice - 123 Example St - 2026-10-30 - REVIEW - font5 - '+sourceHash.slice(0,16)+'.pdf');
  const bad={...r,source_docx_sha256:'wrong'};
  await assert.rejects(run('prepare-pdf.js',bad,nodes),/does not match/);
  await assert.rejects(run('prepare-pdf.js',{...r,template_version:'residential-original-pdf-2026-10-28-format3'},nodes),/does not match/);

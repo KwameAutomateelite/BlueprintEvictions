@@ -19,7 +19,7 @@ from pypdf.generic import (
 
 from residential_notice import NoticeInputError, REFERENCE_SHA256, fields_for_case
 
-PDF_TEMPLATE_VERSION = "residential-original-pdf-2026-11-02-font4"
+PDF_TEMPLATE_VERSION = "residential-original-pdf-2026-11-03-font5"
 MASTER_SHA256 = "cf06f18af3bc79720a91a99afbcd84c5214aa613aa63608feb10508ff0ef989a"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-original.pdf"
 WIDTHS = json.loads((MASTER.parent / "residential-pdf-font-widths.json").read_text())
@@ -146,6 +146,20 @@ def _embed_original_cid_font(writer, page, fonts):
     font[NameObject("/ToUnicode")] = writer._add_object(cmap.flate_encode())
 
 
+def _embed_original_winansi_fonts(writer, fonts):
+    """Supply original body TNR bytes without changing widths or drawing instructions."""
+    regular = fonts["/TiRo"]["/FontDescriptor"].raw_get("/FontFile2")
+    for page in writer.pages:
+        resources = page["/Resources"]["/Font"]
+        for key in ("/TT0", "/TT1"):
+            if key not in resources:
+                continue
+            font = resources[key]
+            if font.get("/Subtype") != "/TrueType" or font.get("/BaseFont") != "/TimesNewRomanPSMT":
+                raise RuntimeError("Original WinAnsi font changed; do not substitute another face")
+            font["/FontDescriptor"][NameObject("/FontFile2")] = regular
+
+
 def _render_original(values, template_path=MASTER):
     source = Path(template_path).read_bytes()
     if sha256(source).hexdigest() != MASTER_SHA256:
@@ -168,6 +182,7 @@ def _render_original(values, template_path=MASTER):
     # page geometry and remaining fixed artwork untouched.
     page = writer.pages[0]
     _embed_original_cid_font(writer, page, fonts)
+    _embed_original_winansi_fonts(writer, fonts)
     page["/Resources"]["/Font"][NameObject("/AMBold12")] = fonts["/TiBo"]
     stream = ContentStream(page.get_contents(), writer)
     heading = False
