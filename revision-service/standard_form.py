@@ -4,11 +4,13 @@ Bookmarks bind editable fields to paragraphs and rent-table cells.
 The patch validates content first; the central renderer then restores layout.
 """
 import re
-import unicodedata
+import json
+from pathlib import Path
 from lxml import etree
 from notice_word_rows import inspect_rows
 
 W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+FONT_WIDTHS = json.loads(Path(__file__).with_name('residential-font-widths.json').read_text())
 WIDTHS = {'TENANT_NAMES': 480, 'PROPERTY_STREET': 445, 'PROPERTY_CITY': 445,
           'COUNTY': 445, 'PAYMENT_RECIPIENT': 420, 'PAYMENT_STREET': 420,
           'PAYMENT_CITY': 420, 'PAYMENT_PHONE': 415,
@@ -87,13 +89,13 @@ def inspect_standard(root):
 
 
 def width(s):
-    result = 0
-    for c in s:
-        em = (1 if unicodedata.east_asian_width(c) in {'W', 'F'} else
-              .95 if c in 'MW@%' else .28 if c in "ilI.,:;'!| " else
-              .73 if c.isupper() else .5 if c.isdigit() else .56)
-        result += em*12
-    return result
+    # Match the central renderer's retained 12pt Times New Roman advances.
+    # Approximate widths wrongly rejected already valid, saved long fields.
+    try:
+        codes = s.encode('cp1252')
+    except UnicodeEncodeError as exc:
+        raise ValueError('Edited field contains unavailable form-font characters') from exc
+    return sum(FONT_WIDTHS['TiRo'][c] for c in codes)*12/1000
 
 
 def lines(p):
@@ -136,7 +138,7 @@ def validate_edit(before, after):
         key = name[3:]
         if key in WIDTHS:
             values = lines(p)
-            if len(values) > (2 if key in {'TENANT_NAMES', 'SIGNER_NAME_AND_TITLE'} else 1):
+            if len(values) > (2 if key in {'TENANT_NAMES', 'SIGNER_NAME_AND_TITLE', 'PROVIDER_STREET'} else 1):
                 raise ValueError('Approved field line count changed')
             if any(width(v) > WIDTHS[key]-4 or '{{' in v or '}}' in v for v in values):
                 raise ValueError('Edited field exceeds approved space')
