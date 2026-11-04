@@ -18,8 +18,8 @@ text_y = y_bottom + original_appearance_baseline
 text_width = sum(original_font_glyph_widths) * 12 / 1000
 ```
 
-PDF coordinates start at the bottom left; 72 points equal one inch. The original
-612 x 792 point page content streams are preserved byte-for-byte. The total stays
+PDF coordinates start at the bottom left; 72 points equal one inch. The retained
+612 x 792 point pages control the artwork, boilerplate and field positions. The total stays
 in its page 1 rectangle `[352.08, 363.538, 459.651, 378.11]`, regardless of rent-row
 count up to six fitting rows. The signature wording and line are already printed in the original page 2
 content stream; the code never redraws, repositions or types that wording.
@@ -31,6 +31,17 @@ and designated signer/name/title. Blank rent rows stay blank. The total must
 equal the sum in decimal cents. Missing required inputs and overflow require
 review; no guessed signer or silently truncated entries are permitted.
 The payment recipient and the designated signer remain separate inputs.
+
+Field-fit validation uses the same retained Times New Roman glyph advances as
+the PDF renderer, at 12 points. It does not estimate width from character count
+or shrink the font. A housing-provider street that needs a second line uses the
+existing Word paragraph and 14-point leading. The PDF expands that widget
+downward by 14 points, preserving its first baseline, and moves the city and
+phone together by the same amount. Care-of/attention text stays above the
+numbered street where both lines fit; suite numbers remain with the street.
+The signature stays in place, and the rent continuation plan includes the extra
+contact height. More than two provider-street lines requires review. Fitting
+one-line contacts retain their original layout.
 
 ## Schedules that outgrow the original space
 
