@@ -92,3 +92,79 @@ class GeneralRetainerTests(unittest.TestCase):
             self.assertEqual(client.post('/retainer-draft', json=self.plan()).status_code, 401)
             self.assertEqual(client.post('/retainer-draft', json=self.plan(), headers={
                 'x-narnia-retainer-secret': 'test-only-secret'}).status_code, 200)
+
+
+class VerificationFieldsTests(unittest.TestCase):
+    def render(self, **office):
+        from retainer_draft import render_retainer_draft
+        return render_retainer_draft({**GeneralRetainerTests().plan(), 'verification': {
+            'capacity': 'plaintiff', 'printed_name': 'Maddy Test Owner', 'title': 'Owner',
+            'execution_county': 'Santa Clara', 'payment_method': 'check',
+            'source': 'Fictional owner fixture confirmed by Kwame', **office}})
+
+    def test_complete_office_fields_are_saved_with_appearances(self):
+        import io
+        from pypdf import PdfReader
+        result = self.render()
+        self.assertTrue(result['office_fields_complete'])
+        self.assertEqual(result['missing_office_fields'], [])
+        self.assertEqual(result['fields']['PAPERCHECK'], 'X')
+        self.assertEqual(result['fields']['CREDITCARD'], '')
+        self.assertFalse(result['approved'])
+        self.assertFalse(result['sent'])
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        fields = saved.get_fields()
+        for name, value in result['fields'].items():
+            self.assertEqual(fields[name]['/V'], value)
+        widgets = [ref.get_object() for ref in saved.pages[2]['/Annots']]
+        for widget in widgets:
+            self.assertTrue(widget['/AP']['/N'].get_object().get_data())
+        self.assertEqual(fields['VERIFICATION PRINTED NAME']['/V'], 'Maddy Test Owner')
+        self.assertEqual(fields['VERIFICATION COUNTY']['/V'], 'Santa Clara')
+        self.assertFalse(any('SIGNATURE' in name or 'DATE' in name for name in fields))
+
+    def test_each_supported_capacity_marks_only_its_own_lines(self):
+        options = ['plaintiff', 'agent', 'llc_member', 'general_partner',
+                   'limited_partner', 'trustee', 'successor_trustee']
+        for capacity in options:
+            with self.subTest(capacity=capacity):
+                extra = {'capacity': capacity}
+                if capacity == 'agent':
+                    extra['plaintiff_name'] = 'Fictional Owner'
+                elif capacity != 'plaintiff':
+                    extra['entity_name'] = 'Fictional Entity'
+                result = self.render(**extra)
+                self.assertTrue(result['office_fields_complete'])
+                marks = [k for k, v in result['fields'].items()
+                         if k.startswith('VERIFICATION CAPACITY') and v]
+                self.assertEqual(len(marks), 1)
+                self.assertEqual(marks[0], 'VERIFICATION CAPACITY ' + (
+                    'PARTNERSHIP' if capacity in ('general_partner', 'limited_partner') else capacity.upper()))
+                entities = [v for k, v in result['fields'].items()
+                            if k.startswith('VERIFICATION ENTITY') and v]
+                self.assertEqual(len(entities), int(capacity not in ('agent', 'plaintiff')))
+
+    def test_missing_office_data_never_claims_ready_for_signature(self):
+        result = self.render(capacity='', printed_name='', title='', execution_county='', payment_method='')
+        self.assertFalse(result['office_fields_complete'])
+        self.assertEqual(set(result['missing_office_fields']),
+                         {'capacity', 'printed_name', 'title', 'execution_county', 'payment_method'})
+        result = self.render(capacity='agent')
+        self.assertIn('plaintiff_name', result['missing_office_fields'])
+
+    def test_bad_or_unsourced_values_are_rejected(self):
+        for extra in [{'source': ''}, {'capacity': 'son'}, {'entity_name': 'Wrong Entity'},
+                      {'printed_name': 'Name\nInjected'}, {'payment_method': 'wire'},
+                      {'printed_name': 'Extremely Long Name ' * 30}, {'signed_date': 'today'}]:
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.render(**extra)
+
+    def test_original_page_contents_and_signature_lines_are_unchanged(self):
+        import io
+        from pypdf import PdfReader
+        from retainer_draft import TEMPLATE
+        source = PdfReader(TEMPLATE)
+        saved = PdfReader(io.BytesIO(base64.b64decode(self.render()['pdf_base64'])))
+        self.assertEqual(len(saved.pages), 3)
+        for old, new in zip(source.pages, saved.pages):
+            self.assertEqual(old.get_contents().get_data(), new.get_contents().get_data())
