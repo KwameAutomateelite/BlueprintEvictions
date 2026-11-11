@@ -47,6 +47,22 @@ class RetainerRouteTests(unittest.TestCase):
             self.assertEqual(client.post('/test-retainer-draft',json=RetainerDraftTests().plan(),headers=headers).status_code,200)
 
 class GeneralRetainerTests(unittest.TestCase):
+    def test_explicit_notice_only_preparation_needs_no_eviction_record(self):
+        from retainer_draft import render_retainer_draft
+        result = render_retainer_draft({**self.plan(), 'case_source': 'notice_only', 'eviction_id': None})
+        self.assertIsNone(result['eviction_id'])
+        self.assertEqual(result['case_source'], 'notice_only')
+        self.assertEqual(result['preparation_version'], 'retainer-notice-or-eviction-2026-11-11')
+        self.assertEqual(result['fields']['SHORT CASE NAME'], self.plan()['case_name'])
+        self.assertFalse(result['sent'])
+        self.assertFalse(result['approved'])
+
+    def test_notice_only_cannot_impersonate_a_linked_eviction(self):
+        from retainer_draft import render_retainer_draft
+        for extra in ({'eviction_id': None}, {'case_source': 'unknown'}, {'case_source': 'notice_only'}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                render_retainer_draft({**self.plan(), **extra})
+
     def test_case_snapshot_does_not_require_a_signed_notice(self):
         from retainer_draft import render_retainer_draft
         plan = self.plan()
