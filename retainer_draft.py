@@ -16,6 +16,7 @@ TEMPLATE_SHA = '20457475f9728c3ebf29196414fc20d4006a3e6134315906cce5e6b4ea450927
 NOTICE_SHA = '202cfbd160a62f7afa74e25983d4389fb4e396ddfd207d025bade463095876e4'
 VERIFICATION_VERSION = 'retainer-office-fields-2026-11-10'
 COUNTY_VERSION = 'retainer-common-county-form-2026-11-10'
+PREPARATION_VERSION = 'retainer-notice-or-eviction-2026-11-11'
 SUPPORTED_COUNTIES = ('Santa Clara', 'Santa Cruz', 'San Benito', 'San Mateo')
 
 
@@ -251,11 +252,18 @@ def render_retainer_draft(plan):
     """Populate an unsigned Santa Clara agreement from an explicit case plan."""
     if not isinstance(plan, dict):
         raise ValueError('Expected a case plan')
-    required = ['record_id', 'eviction_id', 'case_folder_id', 'case_name',
+    required = ['record_id', 'case_folder_id', 'case_name',
                 'property_address', 'tenant_names']
     for key in required:
         if not isinstance(plan.get(key), str) or not plan[key].strip():
             raise ValueError('Missing case field: ' + key)
+    case_source = plan.get('case_source', 'linked_eviction')
+    eviction_id = plan.get('eviction_id')
+    if case_source == 'notice_only':
+        if eviction_id is not None:
+            raise ValueError('Notice-only preparation must not invent an eviction record')
+    elif case_source != 'linked_eviction' or not isinstance(eviction_id, str) or not eviction_id.strip():
+        raise ValueError('Linked eviction preparation requires its actual record')
     if plan.get('missing_inputs') or plan.get('conflicting_inputs'):
         raise ValueError('Retainer plan unresolved')
     county = _property_county(plan.get('county'))
@@ -351,7 +359,8 @@ def render_retainer_draft(plan):
     digest = hashlib.sha256(pdf).hexdigest()
     return {
         'test_only': plan.get('test_only') is True, 'record_id': plan['record_id'],
-        'eviction_id': plan['eviction_id'], 'folder_id': plan['case_folder_id'],
+        'eviction_id': eviction_id, 'case_source': case_source,
+        'preparation_version': PREPARATION_VERSION, 'folder_id': plan['case_folder_id'],
         'source_notice_sha256': plan.get('source_notice_sha256'),
         'source_case_sha256': plan.get('source_case_sha256'), 'template_sha256': TEMPLATE_SHA,
         'sha256': digest, 'mime_type': 'application/pdf',
