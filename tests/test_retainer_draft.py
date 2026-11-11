@@ -111,6 +111,22 @@ class GeneralRetainerTests(unittest.TestCase):
 
 
 class VerificationFieldsTests(unittest.TestCase):
+    def test_scaled_vested_owner_has_valid_visible_pdf_appearance(self):
+        import io
+        import re
+        from pypdf import PdfReader
+        result = self.render(capacity='agent', plaintiff_name='Example Property Holdings LLC',
+                             printed_name='Fictional Agent', title='Property Manager')
+        self.assertEqual(result['appearance_version'], 'retainer-office-appearance-2026-11-11')
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        widget = next(ref.get_object() for ref in saved.pages[2]['/Annots']
+                      if ref.get_object().get('/T') == 'VERIFICATION VESTED OWNER')
+        appearance = widget['/AP']['/N'].get_object().get_data()
+        self.assertIn(b'Example Property Holdings LLC', appearance)
+        self.assertIsNone(re.search(rb'[-+]?\d+(?:\.\d+)?[eE][-+]?\d+', appearance))
+        self.assertEqual(saved.get_fields()['VERIFICATION VESTED OWNER']['/V'],
+                         'Example Property Holdings LLC')
+
     def render(self, **office):
         from retainer_draft import render_retainer_draft
         return render_retainer_draft({**GeneralRetainerTests().plan(), 'verification': {

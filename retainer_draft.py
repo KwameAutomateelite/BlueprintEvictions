@@ -15,6 +15,7 @@ TEMPLATE = Path(__file__).parent / 'templates' / 'santa_clara_retainer.pdf'
 TEMPLATE_SHA = '20457475f9728c3ebf29196414fc20d4006a3e6134315906cce5e6b4ea450927'
 NOTICE_SHA = '202cfbd160a62f7afa74e25983d4389fb4e396ddfd207d025bade463095876e4'
 VERIFICATION_VERSION = 'retainer-office-fields-2026-11-10'
+APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-11'
 COUNTY_VERSION = 'retainer-common-county-form-2026-11-10'
 PREPARATION_VERSION = 'retainer-notice-or-eviction-2026-11-11'
 SUPPORTED_COUNTIES = ('Santa Clara', 'Santa Cruz', 'San Benito', 'San Mateo')
@@ -207,7 +208,12 @@ def _add_verification_fields(writer, definitions):
             raise ValueError('Verification text exceeds its allocated line: ' + name)
         # pypdf puts the baseline at top - font size - 1. Keep that baseline
         # at the source line when a long supported name needs a smaller font.
-        rect = (rect[0], rect[1], rect[2], rect[1] + size + 1)
+        # pypdf rounds /DA font size to four places. An exactly zero-height
+        # baseline can then become e.g. 1.4e-05 in its appearance stream,
+        # which is not a valid PDF number and makes a scaled name invisible.
+        # A 0.01pt baseline allowance avoids that cancellation without moving
+        # any source content or signature line.
+        rect = (rect[0], rect[1], rect[2], rect[1] + size + 1.01)
         widget = DictionaryObject({
             NameObject('/Type'): NameObject('/Annot'),
             NameObject('/Subtype'): NameObject('/Widget'),
@@ -368,6 +374,7 @@ def render_retainer_draft(plan):
         'pdf_base64': base64.b64encode(pdf).decode(),
         'fields': values, 'page_count': len(saved.pages),
         'verification_version': VERIFICATION_VERSION,
+        'appearance_version': APPEARANCE_VERSION,
         'county_version': COUNTY_VERSION, 'property_county': county,
         'office_fields_complete': not missing_office,
         'missing_office_fields': missing_office,
