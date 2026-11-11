@@ -560,8 +560,8 @@ async def health():
     from residential_notice import TEMPLATE_VERSION
     from residential_pdf import PDF_TEMPLATE_VERSION
     from residential_pdf_flow import RENDERER_VERSION
-    from retainer_draft import VERIFICATION_VERSION
-    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True, "residential_rent_pagination": RENDERER_VERSION, "retainer_verification_version": VERIFICATION_VERSION}
+    from retainer_draft import VERIFICATION_VERSION, COUNTY_VERSION
+    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True, "residential_rent_pagination": RENDERER_VERSION, "retainer_verification_version": VERIFICATION_VERSION, "retainer_county_version": COUNTY_VERSION}
 
 
 @app.get("/debug-template")
