@@ -74,7 +74,7 @@ class GeneralRetainerTests(unittest.TestCase):
 
     def test_reject_missing_case_unsupported_county_and_invalid_money(self):
         from retainer_draft import render_retainer_draft
-        for key, value in [('case_folder_id', ''), ('county', 'San Mateo'),
+        for key, value in [('case_folder_id', ''), ('county', 'Unreviewed County'),
                            ('retainer_price', 'NaN'), ('retainer_price', -1),
                            ('retainer_price', '3500.001'), ('conflicting_inputs', ['owner'])]:
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
@@ -168,3 +168,53 @@ class VerificationFieldsTests(unittest.TestCase):
         self.assertEqual(len(saved.pages), 3)
         for old, new in zip(source.pages, saved.pages):
             self.assertEqual(old.get_contents().get_data(), new.get_contents().get_data())
+
+
+class CommonCountyFormTests(unittest.TestCase):
+    def test_reviewed_counties_change_both_printed_references_and_canonical_field(self):
+        import io
+        from pypdf import PdfReader
+        from retainer_draft import render_retainer_draft, SUPPORTED_COUNTIES
+        for county in SUPPORTED_COUNTIES:
+            with self.subTest(county=county):
+                result = render_retainer_draft({**GeneralRetainerTests().plan(), 'county': county + ' County'})
+                saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+                self.assertEqual(result['property_county'], county)
+                self.assertEqual(saved.get_fields()['COUNTY OF']['/V'], county)
+                text = saved.pages[0].extract_text()
+                self.assertEqual(text.count(county + ' County'), 2)
+                if county != 'Santa Clara':
+                    self.assertNotIn('Santa Clara', text)
+                self.assertEqual(len(saved.pages), 3)
+                self.assertFalse(result['sent'])
+
+    def test_new_county_text_keeps_source_font_and_other_pages(self):
+        import io
+        from pypdf import PdfReader
+        from retainer_draft import render_retainer_draft, TEMPLATE
+        source = PdfReader(TEMPLATE)
+        result = render_retainer_draft({**GeneralRetainerTests().plan(), 'county': 'Santa Cruz'})
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        for old, new in zip(source.pages[1:], saved.pages[1:]):
+            self.assertEqual(old.get_contents().get_data(), new.get_contents().get_data())
+        resources = saved.pages[0]['/Resources']['/XObject']
+        changed = []
+        for obj in resources.values():
+            form = obj.get_object()
+            res = form.get('/Resources')
+            if not res:
+                continue
+            fonts = res.get_object().get('/Font')
+            if fonts and '/RetainerCounty' in fonts.get_object():
+                changed.append(form)
+        self.assertEqual(len(changed), 2)
+        for obj in changed:
+            self.assertIn('Inter-Regular', obj['/Resources']['/Font']['/RetainerCounty']['/BaseFont'])
+
+    def test_county_is_case_insensitive_but_never_guessed(self):
+        from retainer_draft import render_retainer_draft
+        result = render_retainer_draft({**GeneralRetainerTests().plan(), 'county': ' san mateo COUNTY '})
+        self.assertEqual(result['property_county'], 'San Mateo')
+        for value in ('', None, 'San Jose', 'Alameda', 'Narnia County'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                render_retainer_draft({**GeneralRetainerTests().plan(), 'county': value})

@@ -2,16 +2,126 @@
 import base64
 import hashlib
 import io
+import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
+from pypdf._cmap import build_char_map
 from pypdf.generic import (NameObject, TextStringObject, ArrayObject,
-                           DictionaryObject, NumberObject, RectangleObject)
+                           DictionaryObject, NumberObject, RectangleObject,
+                           ByteStringObject, ContentStream, DecodedStreamObject, FloatObject)
 
 TEMPLATE = Path(__file__).parent / 'templates' / 'santa_clara_retainer.pdf'
 TEMPLATE_SHA = '20457475f9728c3ebf29196414fc20d4006a3e6134315906cce5e6b4ea450927'
 NOTICE_SHA = '202cfbd160a62f7afa74e25983d4389fb4e396ddfd207d025bade463095876e4'
 VERIFICATION_VERSION = 'retainer-office-fields-2026-11-10'
+COUNTY_VERSION = 'retainer-common-county-form-2026-11-10'
+SUPPORTED_COUNTIES = ('Santa Clara', 'Santa Cruz', 'San Benito', 'San Mateo')
+
+
+def _property_county(value):
+    if not isinstance(value, str):
+        raise ValueError('Supported property county required')
+    normalized = re.sub(r'\s+county$', '', value.strip(), flags=re.I).casefold()
+    for county in SUPPORTED_COUNTIES:
+        if county.casefold() == normalized:
+            return county
+    raise ValueError('Property county is outside the reviewed business county configuration')
+
+
+def _cid_widths(font):
+    descendant = font['/DescendantFonts'][0].get_object()
+    source, widths, i = descendant['/W'], {}, 0
+    while i < len(source):
+        first, second = int(source[i]), source[i + 1]
+        i += 2
+        if isinstance(second, list):
+            widths.update({first + j: float(width) for j, width in enumerate(second)})
+        else:
+            width = float(source[i])
+            i += 1
+            widths.update({j: width for j in range(first, int(second) + 1)})
+    return widths
+
+
+def _fill_printed_county(writer, county):
+    """AM June26 12:26: one agreement covers her counties; county is case data.
+
+    Replace only the two source county runs. Reuse the exact embedded Inter
+    font from page 2, whose subset includes the z needed by Santa Cruz. Keep
+    all source text matrices; adjust the following space by the measured
+    word-width difference. No redaction, overlay, font substitution or reflow.
+    """
+    if county == 'Santa Clara':
+        return
+    county_font = writer.pages[1]['/Resources']['/Font']['/F19']
+    info = build_char_map('/F19', 200, writer.pages[1])
+    reverse = {text: code for code, text in info[3].items()
+               if isinstance(code, str) and isinstance(text, str) and len(text) == 1}
+    if info[2] != 'utf-16-be' or any(c not in reverse for c in county):
+        raise ValueError('Original county font cannot represent this county')
+    encoded = ''.join(reverse[c] for c in county).encode('utf-16-be')
+    widths = _cid_widths(county_font.get_object())
+    xobjects = writer.pages[0]['/Resources']['/XObject']
+    replaced = 0
+    for key, ref in list(xobjects.items()):
+        form = ref.get_object()
+        if form.get('/Subtype') != '/Form' or '/Font' not in form.get('/Resources', {}):
+            continue
+        maps = {name: build_char_map(name, 200, form) for name in form['/Resources']['/Font']}
+        stream = ContentStream(form, writer)
+        flat, positions, font, size = '', [], None, None
+        for index, (args, operator) in enumerate(stream.operations):
+            if operator == b'Tf':
+                font, size = str(args[0]), float(args[1])
+            if operator != b'Tj':
+                continue
+            value = args[0]
+            raw = value.original_bytes if hasattr(value, 'original_bytes') else bytes(value)
+            encoding, cmap = maps[font][2:4]
+            text = raw.decode(encoding) if isinstance(encoding, str) else ''.join(encoding[c] for c in raw)
+            text = ''.join(cmap.get(c, c) for c in text)
+            for char in text:
+                flat += char
+                positions.append((index, font, size, len(text)))
+        matches = list(re.finditer(r'Santa\s+Clara', flat))
+        if not matches:
+            continue
+        if len(matches) != 1:
+            raise ValueError('Source county layout changed')
+        match = matches[0]
+        run = positions[match.start():match.end()]
+        first, old_font, size, _ = run[0]
+        last = run[-1][0]
+        if any(f != old_font or s != size or length != 1 for _, f, s, length in run):
+            raise ValueError('Source county glyph run changed')
+        following, operator = stream.operations[last + 1]
+        region = stream.operations[first + 1:last + 2]
+        if operator != b'Td' or float(following[1]) != 0 or any(op not in (b'Td', b'Tj') for _, op in region):
+            raise ValueError('Source county spacing changed')
+        old_width = sum(float(args[0]) for args, op in region if op == b'Td')
+        new_width = sum(widths[ord(reverse[c])] for c in county) * size / 1000
+        if new_width > old_width + .1:
+            raise ValueError('County exceeds its source text allocation')
+        following[0] = FloatObject(float(following[0]) + new_width - old_width)
+        old_indices = {index for index, _, _, _ in run}
+        operations = []
+        for index, operation in enumerate(stream.operations):
+            if index == first:
+                operations += [([NameObject('/RetainerCounty'), FloatObject(size)], b'Tf'),
+                               ([ByteStringObject(encoded)], b'Tj'),
+                               ([NameObject(old_font), FloatObject(size)], b'Tf')]
+            elif index not in old_indices:
+                operations.append(operation)
+        stream.operations = operations
+        form['/Resources']['/Font'][NameObject('/RetainerCounty')] = county_font
+        replacement = DecodedStreamObject()
+        replacement.update({k: v for k, v in form.items() if k not in ('/Filter', '/DecodeParms', '/Length')})
+        replacement.set_data(stream.get_data())
+        xobjects[key] = writer._add_object(replacement)
+        replaced += 1
+    if replaced != 2:
+        raise ValueError('Expected both printed source county references')
 
 
 def _verification_values(plan):
@@ -148,8 +258,7 @@ def render_retainer_draft(plan):
             raise ValueError('Missing case field: ' + key)
     if plan.get('missing_inputs') or plan.get('conflicting_inputs'):
         raise ValueError('Retainer plan unresolved')
-    if plan.get('county') not in ('Santa Clara', 'Santa Clara County'):
-        raise ValueError('No verified retainer template for this county')
+    county = _property_county(plan.get('county'))
     if plan.get('property_type') not in ('residential', 'commercial'):
         raise ValueError('Property type required')
     try:
@@ -166,7 +275,7 @@ def render_retainer_draft(plan):
     office, verification_fields, missing_office = _verification_values(plan)
     values = {
         'SHORT CASE NAME': case_name, 'DEFENDANT': plan['tenant_names'],
-        'DEFENDANT STREET ADDRESS': address, 'COUNTY OF': 'Santa Clara',
+        'DEFENDANT STREET ADDRESS': address, 'COUNTY OF': county,
         'TOTAL': f'${amount:,.2f}',
         'PAPERCHECK': 'X' if office.get('payment_method') == 'check' else '',
         'CREDITCARD': 'X' if office.get('payment_method') == 'card' else '',
@@ -177,6 +286,7 @@ def render_retainer_draft(plan):
         raise ValueError('Retainer fields missing')
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
+    _fill_printed_county(writer, county)
     # The template repeats SHORT CASE NAME as child widgets. pypdf 4 reads
     # their own value when building appearances, not the parent field value.
     # Set both consistently before generating appearances on every page.
@@ -249,6 +359,7 @@ def render_retainer_draft(plan):
         'pdf_base64': base64.b64encode(pdf).decode(),
         'fields': values, 'page_count': len(saved.pages),
         'verification_version': VERIFICATION_VERSION,
+        'county_version': COUNTY_VERSION, 'property_county': county,
         'office_fields_complete': not missing_office,
         'missing_office_fields': missing_office,
         'verification_source': office.get('source', ''),
