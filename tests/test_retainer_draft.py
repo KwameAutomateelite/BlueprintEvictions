@@ -226,8 +226,13 @@ class VerificationFieldsTests(unittest.TestCase):
         for field in fields:
             self.assertTrue(field['required'])
             self.assertEqual(field['signer'], 0)
+            self.assertEqual(field['document_index'], 0)
+            for coordinate in ('x', 'y', 'width', 'height'):
+                self.assertIsInstance(field[coordinate], int)
             self.assertLessEqual(field['x'] + field['width'], 612)
             self.assertLessEqual(field['y'] + field['height'], 792)
+        self.assertEqual(fields[0]['width'], round(154 * 80 / 72 + 2))
+        self.assertEqual(fields[0]['height'], round(21 * 80 / 72))
 
 
 class CommonCountyFormTests(unittest.TestCase):
