@@ -15,7 +15,8 @@ TEMPLATE = Path(__file__).parent / 'templates' / 'santa_clara_retainer.pdf'
 TEMPLATE_SHA = '20457475f9728c3ebf29196414fc20d4006a3e6134315906cce5e6b4ea450927'
 NOTICE_SHA = '202cfbd160a62f7afa74e25983d4389fb4e396ddfd207d025bade463095876e4'
 VERIFICATION_VERSION = 'retainer-office-fields-2026-11-10'
-APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-11'
+APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-11-v2'
+SIGNING_FIELDS_VERSION = 'retainer-six-signing-fields-2026-11-11'
 COUNTY_VERSION = 'retainer-common-county-form-2026-11-10'
 PREPARATION_VERSION = 'retainer-notice-or-eviction-2026-11-11'
 SUPPORTED_COUNTIES = ('Santa Clara', 'Santa Cruz', 'San Benito', 'San Mateo')
@@ -164,7 +165,7 @@ def _verification_values(plan):
         'VERIFICATION PRINTED NAME': (office.get('printed_name', ''), (174, 92, 312, 105), 12),
         'VERIFICATION TITLE': (office.get('title', ''), (102, 64.5, 312, 77.5), 12),
         'VERIFICATION COUNTY': (office.get('execution_county', ''), (445, 195.5, 527, 208.5), 12),
-        'VERIFICATION VESTED OWNER': (office.get('plaintiff_name', ''), (387, 552.5, 535, 565.5), 12),
+        'VERIFICATION VESTED OWNER': (office.get('plaintiff_name', ''), (387, 552.5, 540, 565.5), 12),
     }
     for key, y in {'plaintiff': 634.86, 'agent': 607.26, 'llc_member': 524.47,
                    'partnership': 469.28, 'trustee': 414.07,
@@ -202,10 +203,26 @@ def _add_verification_fields(writer, definitions):
             raise ValueError('Verification text is outside the template font: ' + name)
         units = sum(float(widths[c - first]) for c in encoded)
         width = rect[2] - rect[0] - 4
-        if units:
-            size = min(size, width * 1000 / units)
-        if size < 9:
-            raise ValueError('Verification text exceeds its allocated line: ' + name)
+        display = value
+        line_count = 1
+        if units * size / 1000 > width:
+            if name != 'VERIFICATION VESTED OWNER':
+                raise ValueError('Verification text exceeds its allocated line: ' + name)
+            # Keep the selected font size. There is one blank line below the
+            # vested-owner allocation, before the next capacity paragraph.
+            lines = ['']
+            for word in value.split():
+                trial = (lines[-1] + ' ' + word).strip()
+                trial_width = sum(float(widths[c - first]) for c in trial.encode('cp1252')) * size / 1000
+                if trial_width <= width:
+                    lines[-1] = trial
+                else:
+                    if not lines[-1]:
+                        raise ValueError('Verification text exceeds its allocated line: ' + name)
+                    lines.append(word)
+            if len(lines) > 2 or any(sum(float(widths[c-first]) for c in line.encode('cp1252')) * size / 1000 > width for line in lines):
+                raise ValueError('Verification text exceeds its allocated line: ' + name)
+            display, line_count = '\n'.join(lines), len(lines)
         # pypdf puts the baseline at top - font size - 1. Keep that baseline
         # at the source line when a long supported name needs a smaller font.
         # pypdf rounds /DA font size to four places. An exactly zero-height
@@ -213,7 +230,8 @@ def _add_verification_fields(writer, definitions):
         # which is not a valid PDF number and makes a scaled name invisible.
         # A 0.01pt baseline allowance avoids that cancellation without moving
         # any source content or signature line.
-        rect = (rect[0], rect[1], rect[2], rect[1] + size + 1.01)
+        rect = (rect[0], rect[1] - (line_count - 1) * size * 1.4,
+                rect[2], rect[1] + size + 1.01)
         widget = DictionaryObject({
             NameObject('/Type'): NameObject('/Annot'),
             NameObject('/Subtype'): NameObject('/Widget'),
@@ -228,7 +246,33 @@ def _add_verification_fields(writer, definitions):
         ref = writer._add_object(widget)
         page['/Annots'].append(ref)
         form['/Fields'].append(ref)
+        if line_count > 1:
+            widget[NameObject('/Ff')] = NumberObject(4096)
+            widget[NameObject('/V')] = TextStringObject(display)
         writer._update_text_field(widget)
+        widget[NameObject('/V')] = TextStringObject(value)
+
+
+def retainer_signing_fields(pages):
+    """Six existing signature/date lines, in Dropbox Sign top-left PDF points.
+
+    Preparing these coordinates never calls the provider or signs/dates a PDF.
+    Keep the printed lines and body unchanged; the client supplies all six values.
+    """
+    lines = [(1, 'signature', (169, 45, 323, 66)),
+             (1, 'date_signed', (405, 45, 557, 66)),
+             (2, 'signature', (61, 90, 275, 113)),
+             (2, 'date_signed', (332, 88, 546, 111)),
+             (3, 'signature', (77, 120, 312, 143)),
+             (3, 'date_signed', (156, 173, 265, 190))]
+    result = []
+    for number, kind, (left, bottom, right, top) in lines:
+        page = pages[number - 1]
+        result.append({'api_id': f'retainer_{kind}_{number}', 'type': kind,
+                       'signer': 0, 'required': True, 'page': number,
+                       'x': left, 'y': round(float(page.mediabox.top) - top, 2),
+                       'width': right - left, 'height': top - bottom})
+    return result
 
 
 def render_test_retainer(plan):
@@ -312,12 +356,22 @@ def render_retainer_draft(plan):
             if name in values:
                 widget[NameObject('/V')] = TextStringObject(values[name])
                 widget[NameObject('/FT')] = field.get('/FT', NameObject('/Tx'))
-                widget[NameObject('/DA')] = field.get('/DA', TextStringObject('/Helv 10 Tf 0 g'))
+                # Use the form's embedded Times New Roman for every case input,
+                # instead of the template's mixed Arial/Helvetica defaults.
+                size = 10 if name in ('PAPERCHECK', 'CREDITCARD') else 12
+                appearance = TextStringObject(f'/TimesNewRoman {size} Tf 0 g')
+                widget[NameObject('/DA')] = appearance
+                field[NameObject('/DA')] = appearance
+                if float(widget['/Rect'][3]) - float(widget['/Rect'][1]) < size + 1.01:
+                    rect = list(widget['/Rect'])
+                    rect[3] = float(rect[1]) + size + 1.01
+                    widget[NameObject('/Rect')] = RectangleObject(rect)
                 field[NameObject('/V')] = TextStringObject(values[name])
         # A reset button obscures the header and can wipe a reviewed form.
         page[NameObject('/Annots')] = ArrayObject([
             ref for ref in page.get('/Annots', [])
-            if ref.get_object().get('/T') != 'RESET FORM'])
+            if ref.get_object().get('/T') != 'RESET FORM'
+            and ref.get_object().get('/Subtype') in ('/Widget', '/Link')])
         if '/Annots' in page:
             writer.update_page_form_field_values(page, values, auto_regenerate=False)
             for ref in page['/Annots']:
@@ -375,6 +429,9 @@ def render_retainer_draft(plan):
         'fields': values, 'page_count': len(saved.pages),
         'verification_version': VERIFICATION_VERSION,
         'appearance_version': APPEARANCE_VERSION,
+        'signing_fields_version': SIGNING_FIELDS_VERSION,
+        'signing_fields': retainer_signing_fields(saved.pages),
+        'signature_request_created': False,
         'county_version': COUNTY_VERSION, 'property_county': county,
         'office_fields_complete': not missing_office,
         'missing_office_fields': missing_office,
