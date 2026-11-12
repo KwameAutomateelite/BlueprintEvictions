@@ -117,12 +117,13 @@ class VerificationFieldsTests(unittest.TestCase):
         from pypdf import PdfReader
         result = self.render(capacity='agent', plaintiff_name='Example Property Holdings LLC',
                              printed_name='Fictional Agent', title='Property Manager')
-        self.assertEqual(result['appearance_version'], 'retainer-office-appearance-2026-11-11')
+        self.assertEqual(result['appearance_version'], 'retainer-office-appearance-2026-11-11-v2')
         saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
         widget = next(ref.get_object() for ref in saved.pages[2]['/Annots']
                       if ref.get_object().get('/T') == 'VERIFICATION VESTED OWNER')
         appearance = widget['/AP']['/N'].get_object().get_data()
-        self.assertIn(b'Example Property Holdings LLC', appearance)
+        for word in (b'Example', b'Property', b'Holdings', b'LLC'):
+            self.assertIn(word, appearance)
         self.assertIsNone(re.search(rb'[-+]?\d+(?:\.\d+)?[eE][-+]?\d+', appearance))
         self.assertEqual(saved.get_fields()['VERIFICATION VESTED OWNER']['/V'],
                          'Example Property Holdings LLC')
@@ -200,6 +201,33 @@ class VerificationFieldsTests(unittest.TestCase):
         self.assertEqual(len(saved.pages), 3)
         for old, new in zip(source.pages, saved.pages):
             self.assertEqual(old.get_contents().get_data(), new.get_contents().get_data())
+
+    def test_comments_removed_and_populated_text_uses_consistent_typeface(self):
+        import io
+        from pypdf import PdfReader
+        result = self.render(capacity='agent', plaintiff_name='Example Holdings LLC')
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        for page in saved.pages:
+            for ref in page.get('/Annots', []):
+                widget = ref.get_object()
+                self.assertIn(widget.get('/Subtype'), ('/Widget', '/Link'))
+                field = widget.get('/Parent', widget).get_object()
+                name = field.get('/T', '')
+                if name in result['fields'] and result['fields'][name] and name not in ('PAPERCHECK', 'CREDITCARD') and not name.startswith(('VERIFICATION CAPACITY', 'VERIFICATION PARTNERSHIP')):
+                    self.assertEqual(str(widget.get('/DA') or field['/DA']), '/TimesNewRoman 12 Tf 0 g' if not name.startswith('VERIFICATION') else '/TimesNewRoman 12.0000 Tf 0 g')
+
+    def test_all_three_pages_have_client_signature_and_date_coordinates(self):
+        result = self.render()
+        self.assertFalse(result['signature_request_created'])
+        fields = result['signing_fields']
+        self.assertEqual(len(fields), 6)
+        for page in (1, 2, 3):
+            self.assertEqual({f['type'] for f in fields if f['page'] == page}, {'signature', 'date_signed'})
+        for field in fields:
+            self.assertTrue(field['required'])
+            self.assertEqual(field['signer'], 0)
+            self.assertLessEqual(field['x'] + field['width'], 612)
+            self.assertLessEqual(field['y'] + field['height'], 792)
 
 
 class CommonCountyFormTests(unittest.TestCase):
