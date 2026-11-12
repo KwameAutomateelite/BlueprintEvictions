@@ -16,7 +16,7 @@ TEMPLATE_SHA = '20457475f9728c3ebf29196414fc20d4006a3e6134315906cce5e6b4ea450927
 NOTICE_SHA = '202cfbd160a62f7afa74e25983d4389fb4e396ddfd207d025bade463095876e4'
 VERIFICATION_VERSION = 'retainer-office-fields-2026-11-10'
 APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-11-v2'
-SIGNING_FIELDS_VERSION = 'retainer-six-signing-fields-2026-11-11'
+SIGNING_FIELDS_VERSION = 'retainer-six-signing-fields-2026-11-11-v2'
 COUNTY_VERSION = 'retainer-common-county-form-2026-11-10'
 PREPARATION_VERSION = 'retainer-notice-or-eviction-2026-11-11'
 SUPPORTED_COUNTIES = ('Santa Clara', 'Santa Cruz', 'San Benito', 'San Mateo')
@@ -268,10 +268,13 @@ def retainer_signing_fields(pages):
     result = []
     for number, kind, (left, bottom, right, top) in lines:
         page = pages[number - 1]
-        result.append({'api_id': f'retainer_{kind}_{number}', 'type': kind,
+        # Dropbox uses 72-DPI integer positions, but 80-DPI field dimensions.
+        # https://help.dropbox.com/integrations/how-to-use-the-form-fields-per-document-parameter
+        result.append({'document_index': 0, 'api_id': f'retainer_{kind}_{number}', 'type': kind,
                        'signer': 0, 'required': True, 'page': number,
-                       'x': left, 'y': round(float(page.mediabox.top) - top, 2),
-                       'width': right - left, 'height': top - bottom})
+                       'x': left, 'y': round(float(page.mediabox.top) - top),
+                       'width': round((right - left) * 80 / 72 + 2),
+                       'height': round((top - bottom) * 80 / 72)})
     return result
 
 
