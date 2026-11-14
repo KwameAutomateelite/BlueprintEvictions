@@ -15,7 +15,7 @@ TEMPLATE = Path(__file__).parent / 'templates' / 'santa_clara_retainer.pdf'
 TEMPLATE_SHA = '20457475f9728c3ebf29196414fc20d4006a3e6134315906cce5e6b4ea450927'
 NOTICE_SHA = '202cfbd160a62f7afa74e25983d4389fb4e396ddfd207d025bade463095876e4'
 VERIFICATION_VERSION = 'retainer-office-fields-2026-11-10'
-APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-11-v2'
+APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-13-v3'
 SIGNING_FIELDS_VERSION = 'retainer-six-signing-fields-2026-11-11-v2'
 COUNTY_VERSION = 'retainer-common-county-form-2026-11-10'
 PREPARATION_VERSION = 'retainer-notice-or-eviction-2026-11-11'
@@ -206,7 +206,8 @@ def _add_verification_fields(writer, definitions):
         display = value
         line_count = 1
         if units * size / 1000 > width:
-            if name != 'VERIFICATION VESTED OWNER':
+            if name not in ('VERIFICATION VESTED OWNER', 'VERIFICATION ENTITY TRUSTEE',
+                            'VERIFICATION ENTITY SUCCESSOR_TRUSTEE'):
                 raise ValueError('Verification text exceeds its allocated line: ' + name)
             # Keep the selected font size. There is one blank line below the
             # vested-owner allocation, before the next capacity paragraph.
