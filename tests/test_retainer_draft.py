@@ -117,7 +117,7 @@ class VerificationFieldsTests(unittest.TestCase):
         from pypdf import PdfReader
         result = self.render(capacity='agent', plaintiff_name='Example Property Holdings LLC',
                              printed_name='Fictional Agent', title='Property Manager')
-        self.assertEqual(result['appearance_version'], 'retainer-office-appearance-2026-11-11-v2')
+        self.assertEqual(result['appearance_version'], 'retainer-office-appearance-2026-11-13-v3')
         saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
         widget = next(ref.get_object() for ref in saved.pages[2]['/Annots']
                       if ref.get_object().get('/T') == 'VERIFICATION VESTED OWNER')
@@ -184,6 +184,24 @@ class VerificationFieldsTests(unittest.TestCase):
                          {'capacity', 'printed_name', 'title', 'execution_county', 'payment_method'})
         result = self.render(capacity='agent')
         self.assertIn('plaintiff_name', result['missing_office_fields'])
+
+    def test_trustee_long_entity_keeps_full_value_and_twelve_point_appearance(self):
+        import io
+        from pypdf import PdfReader
+        entity = 'David P. Blouin and Mona-Lisa M. Blouin Inter Vivos Trust dated November 6, 2000'
+        result = self.render(capacity='trustee', printed_name='Mona-Lisa Blouin',
+                             title='Trustee', entity_name=entity, execution_county='')
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        key = 'VERIFICATION ENTITY TRUSTEE'
+        self.assertEqual(saved.get_fields()[key]['/V'], entity)
+        widget = next(ref.get_object() for ref in saved.pages[2]['/Annots']
+                      if ref.get_object().get('/T') == key)
+        self.assertEqual(str(widget['/DA']), '/TimesNewRoman 12.0000 Tf 0 g')
+        self.assertTrue(int(widget['/Ff']) & 4096)
+        self.assertEqual(result['fields']['VERIFICATION COUNTY'], '')
+        self.assertEqual(result['missing_office_fields'], ['execution_county'])
+        self.assertEqual(result['state'], 'unsigned_draft_for_review')
+        self.assertFalse(result['sent'])
 
     def test_bad_or_unsourced_values_are_rejected(self):
         for extra in [{'source': ''}, {'capacity': 'son'}, {'entity_name': 'Wrong Entity'},
