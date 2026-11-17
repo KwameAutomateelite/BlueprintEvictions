@@ -1,0 +1,17 @@
+const assert=require('node:assert/strict');
+const {prepareCaseQuery}=require('./case-name-query.cjs');
+const {verifyCaseAsset}=require('./case-asset-boundary.cjs');
+const {verifyDispatchApproval,dispatchApprovalKey}=require('./dispatch-approval.cjs');
+assert.deepEqual(prepareCaseQuery({query:'Smith v. Jones'})[0].json.terms,['smith','jones']);
+assert.throws(()=>prepareCaseQuery({query:'show me all notices'}));
+assert(prepareCaseQuery({query:'123 Test St, Unit QC17'})[0].json.terms.includes('qc17'));
+const c={folder_id:'case'},request={item_id:'file'},m={id:'file',file:{},eTag:'v1',size:100,name:'retainer-draft.pdf',parentReference:{id:'review'}},parent={id:'review',folder:{},name:'Maddy retainer review - '+'a'.repeat(64),parentReference:{id:'case'}};
+assert(verifyCaseAsset(m,c,request,parent).retainer_review_child);
+assert.throws(()=>verifyCaseAsset(m,c,request,{...parent,parentReference:{id:'another-case'}}));
+assert.throws(()=>verifyCaseAsset({...m,parentReference:{id:'unknown'}},c,request,parent));
+const ctx={record_id:'owned-case',case_folder_id:'case',signature_request_id:'sig',expected_sha256:'a'.repeat(64),test_mode:true,runtime_policy:{process_server_override:'owned@example.test',reviewer_senders:['owner@example.test']}};
+const a={schema:'blueprint.dispatch.approval.v1',approved:true,record_id:ctx.record_id,folder_id:ctx.case_folder_id,signature_request_id:ctx.signature_request_id,signed_sha256:ctx.expected_sha256,recipient:'owned@example.test',test_mode:true,reviewer_email:'owner@example.test',approval:'APPROVE THIS SIGNED VERSION FOR PROCESS SERVER',approval_quote:'Send this signed test version.',approved_at:new Date().toISOString()};
+assert(verifyDispatchApproval(ctx,a));assert(!verifyDispatchApproval(ctx,null));
+for(const[k,v]of Object.entries({record_id:'other',folder_id:'other',signature_request_id:'old',signed_sha256:'b'.repeat(64),recipient:'another@example.test',test_mode:false,reviewer_email:'unknown@example.test',approved:false,approval:'yes',approval_quote:''}))assert(!verifyDispatchApproval(ctx,{...a,[k]:v}),k);
+assert.notEqual(dispatchApprovalKey(ctx),dispatchApprovalKey({...ctx,signature_request_id:'next'}));
+console.log('Case query, retainer child-folder boundary and exact dispatch approval checks passed.');

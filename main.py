@@ -36,7 +36,7 @@ app = FastAPI(title="Blueprint Evictions - Dropbox Sign Service", version="2.1.0
 
 @app.middleware('http')
 async def authenticate_signature_send(request: Request, call_next):
-    if request.url.path == '/send-signature':
+    if request.url.path in {'/send-signature', '/inspect-source-pdf'}:
         import hmac
         secret = os.environ.get('SIGNATURE_STORAGE_BRIDGE_SECRET', '')
         supplied = request.headers.get('x-maddy-signature-key', '')
@@ -562,7 +562,7 @@ async def health():
     from residential_pdf import PDF_TEMPLATE_VERSION
     from residential_pdf_flow import RENDERER_VERSION
     from retainer_draft import VERIFICATION_VERSION, APPEARANCE_VERSION, COUNTY_VERSION, PREPARATION_VERSION, SIGNING_FIELDS_VERSION
-    return {"status": "ok", "service": "dropbox-sign-service", "signature_callback_protocol_version": "all-authenticated-events-2026-11-17-v1", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True, "residential_rent_pagination": RENDERER_VERSION, "retainer_verification_version": VERIFICATION_VERSION, "retainer_appearance_version": APPEARANCE_VERSION, "retainer_county_version": COUNTY_VERSION, "retainer_preparation_version": PREPARATION_VERSION, "retainer_signing_fields_version": SIGNING_FIELDS_VERSION}
+    return {"status": "ok", "service": "dropbox-sign-service", "signature_callback_protocol_version": "all-authenticated-events-2026-11-17-v1", "pdf_source_text_version": "bound-pdf-text-2026-11-17-v1", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True, "residential_rent_pagination": RENDERER_VERSION, "retainer_verification_version": VERIFICATION_VERSION, "retainer_appearance_version": APPEARANCE_VERSION, "retainer_county_version": COUNTY_VERSION, "retainer_preparation_version": PREPARATION_VERSION, "retainer_signing_fields_version": SIGNING_FIELDS_VERSION}
 
 
 @app.get("/debug-template")
@@ -2054,6 +2054,21 @@ def _underline_notice_recipients(doc):
 class SavedNoticePdfRequest(BaseModel):
     docx_base64: str = Field(max_length=6_000_000)
     expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PdfSourceTextRequest(BaseModel):
+    pdf_base64: str = Field(max_length=42_000_000)
+    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@app.post("/inspect-source-pdf")
+async def inspect_source_pdf(req: PdfSourceTextRequest):
+    """Read only exact uploaded bytes; never fetch a caller-supplied URL or infer facts."""
+    from pdf_source_text import inspect_pdf_source
+    try:
+        return await asyncio.to_thread(inspect_pdf_source, req.pdf_base64, req.expected_sha256)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/render-saved-notice-pdf")
