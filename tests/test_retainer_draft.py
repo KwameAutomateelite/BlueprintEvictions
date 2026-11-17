@@ -17,6 +17,7 @@ class RetainerDraftTests(unittest.TestCase):
                 render_test_retainer({**self.plan(),key:value})
     def test_repeated_case_name_widgets_have_text_appearances(self):
         from pypdf import PdfReader
+        from pypdf.generic import ContentStream
         import io
         result=render_test_retainer(self.plan())
         reader=PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
@@ -26,7 +27,10 @@ class RetainerDraftTests(unittest.TestCase):
                 widget=ref.get_object()
                 field=widget.get('/Parent',widget).get_object()
                 if field.get('/T')=='SHORT CASE NAME':
-                    self.assertIn(b'Tenant Maddy v. Maddy',widget['/AP']['/N'].get_object().get_data())
+                    text = ''.join(str(args[0]) for args, op in
+                                   ContentStream(widget['/AP']['/N'].get_object(), reader).operations
+                                   if op == b'Tj')
+                    self.assertEqual(text, 'Tenant Maddy v. Maddy')
                     count+=1
                 self.assertNotEqual(widget.get('/T'),'RESET FORM')
         self.assertEqual(count,2)
@@ -117,7 +121,7 @@ class VerificationFieldsTests(unittest.TestCase):
         from pypdf import PdfReader
         result = self.render(capacity='agent', plaintiff_name='Example Property Holdings LLC',
                              printed_name='Fictional Agent', title='Property Manager')
-        self.assertEqual(result['appearance_version'], 'retainer-office-appearance-2026-11-13-v3')
+        self.assertEqual(result['appearance_version'], 'retainer-office-appearance-2026-11-16-v4')
         saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
         widget = next(ref.get_object() for ref in saved.pages[2]['/Annots']
                       if ref.get_object().get('/T') == 'VERIFICATION VESTED OWNER')
@@ -251,6 +255,47 @@ class VerificationFieldsTests(unittest.TestCase):
             self.assertLessEqual(field['y'] + field['height'], 792)
         self.assertEqual(fields[0]['width'], round(154 * 80 / 72 + 2))
         self.assertEqual(fields[0]['height'], round(21 * 80 / 72))
+
+
+class FirstPageCaseLayoutTests(unittest.TestCase):
+    def test_three_case_rows_do_not_overlap_or_clip_the_apartment(self):
+        import io
+        from pypdf import PdfReader
+        from retainer_draft import render_retainer_draft
+        plan = {**GeneralRetainerTests().plan(), 'case_name': 'Blouin v. Segoviano',
+                'tenant_names': 'Gaspar Segoviano, Blanca Morzon, Kevin Segoviano Morzon.',
+                'property_address': '2069 Radio Ave, Apt 4, San Jose, CA 95125'}
+        result = render_retainer_draft(plan)
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        rows = []
+        for ref in saved.pages[0]['/Annots']:
+            widget = ref.get_object()
+            name = widget.get('/Parent', widget).get_object().get('/T')
+            if name not in ('SHORT CASE NAME', 'DEFENDANT', 'DEFENDANT STREET ADDRESS'):
+                continue
+            rect = [float(v) for v in widget['/Rect']]
+            rows.append(rect)
+            self.assertGreater(rect[1], 644.90)  # Original blue bottom rule.
+            self.assertLess(rect[3], 683.15)    # Original top rule.
+            appearance = widget['/AP']['/N'].get_object().get_data()
+            self.assertIn(b'/TimesNewRoman 12 Tf', appearance)
+            self.assertIn(b'2 3 Td', appearance)  # Descenders have real space.
+            value = result['fields'][name]
+            self.assertEqual(saved.get_fields()[name]['/V'], value)
+            self.assertEqual(widget['/V'], value)
+            self.assertIn(value.encode('cp1252').hex().encode(), appearance)
+        self.assertEqual(len(rows), 3)
+        rows.sort(key=lambda r: r[1])
+        for lower, upper in zip(rows, rows[1:]):
+            self.assertLessEqual(lower[3], upper[1] + .001)
+        self.assertEqual(saved.metadata['/MaddyRetainerDraftRecord'], plan['record_id'])
+        self.assertEqual(saved.metadata['/MaddyRetainerReviewOnly'], 'unsigned')
+
+    def test_text_that_cannot_fit_never_silently_overlays_or_truncates(self):
+        from retainer_draft import render_retainer_draft
+        with self.assertRaisesRegex(ValueError, 'exceeds its first-page row'):
+            render_retainer_draft({**GeneralRetainerTests().plan(),
+                                   'tenant_names': 'Very Long Tenant Name ' * 30})
 
 
 class CommonCountyFormTests(unittest.TestCase):
