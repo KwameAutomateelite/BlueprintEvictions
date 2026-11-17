@@ -54,6 +54,12 @@ def apply_flow_layout(doc, values, count):
       (starts("Housing Provider's Address:"),540),(bound('PROVIDER_STREET'),556),(bound('PROVIDER_CITY'),571),
       (bound('PROVIDER_PHONE'),585.5)],
     }
+    provider_extra = values['PROVIDER_STREET'].count('\n') * 14.0
+    if provider_extra:
+        label = 'signature and housing provider contact'
+        groups[label] = [(p, y + (provider_extra if p in
+            (bound('PROVIDER_CITY'), bound('PROVIDER_PHONE')) else 0))
+            for p, y in groups[label]]
     total = next(t for t in original if t.tag==W+'tbl' and text(t).startswith('TOTAL AMOUNT DUE:'))
     sect = next(x for x in original if x.tag==W+'sectPr')
     for node in original:

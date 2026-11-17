@@ -60,3 +60,38 @@ def test_original_table_notices_keep_their_revision_path():
     assert inspect_rent_tables(root(b.getvalue()))[0]['total']['cents']==100000
     out=patch_docx(b.getvalue(),[{'old':'September 1, 2026','new':'October 1, 2026'}])
     assert inspect_rent_tables(root(out))[0]['rows'][0]['label']=='October 1, 2026'
+
+def test_editor_metrics_match_the_retained_template_and_renderer():
+    import json
+    from standard_form import FONT_WIDTHS, width
+    from residential_notice import measured_width, MASTER
+    assert FONT_WIDTHS == json.loads((MASTER.parent/'residential-pdf-font-widths.json').read_text())
+    assert width('Example Trust, November 6, 2000') == measured_width('Example Trust, November 6, 2000')
+    with pytest.raises(ValueError):width('Unsupported \u6f22')
+
+def test_unrelated_name_edit_accepts_valid_long_owner_and_two_line_provider():
+    data=case(2)
+    data.update(payment_recipient_name='David Example and Mona-Lisa Example Inter Vivos Trust dated November 6, 2000',
+                housing_provider_street='c/o Shipping Xpress, Attn: Blueprint Evictions, 1060 Lincoln Ave, Suite 20-1022')
+    raw=render_residential_notice(data)
+    before=root(raw)
+    from standard_form import bindings, lines
+    assert len(lines(bindings(before)['BE_PROVIDER_STREET'][1]))==2
+    result=patch_docx(raw,[{'old':'Alex Example','new':'Alex Sample'}])
+    from residential_word_snapshot import saved_word_case
+    a,b=saved_word_case(raw),saved_word_case(result)
+    assert a['tenant_names']!=b['tenant_names']
+    assert {k:v for k,v in a.items() if k!='tenant_names'}=={k:v for k,v in b.items() if k!='tenant_names'}
+
+def test_provider_still_rejects_three_lines_and_text_overflow():
+    from standard_form import bindings, validate_edit
+    before=root(render_residential_notice(case(2)))
+    for parts in [['One','Two','Three'],['W'*100,'Two']]:
+        after=deepcopy(before);p=bindings(after)['BE_PROVIDER_STREET'][1]
+        for child in list(p):
+            if child.tag==W+'r':p.remove(child)
+        r=E.SubElement(p,W+'r')
+        for i,value in enumerate(parts):
+            if i:E.SubElement(r,W+'br')
+            E.SubElement(r,W+'t').text=value
+        with pytest.raises(ValueError):validate_edit(before,after)

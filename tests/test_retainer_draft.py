@@ -17,6 +17,7 @@ class RetainerDraftTests(unittest.TestCase):
                 render_test_retainer({**self.plan(),key:value})
     def test_repeated_case_name_widgets_have_text_appearances(self):
         from pypdf import PdfReader
+        from pypdf.generic import ContentStream
         import io
         result=render_test_retainer(self.plan())
         reader=PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
@@ -26,7 +27,10 @@ class RetainerDraftTests(unittest.TestCase):
                 widget=ref.get_object()
                 field=widget.get('/Parent',widget).get_object()
                 if field.get('/T')=='SHORT CASE NAME':
-                    self.assertIn(b'Tenant Maddy v. Maddy',widget['/AP']['/N'].get_object().get_data())
+                    text = ''.join(str(args[0]) for args, op in
+                                   ContentStream(widget['/AP']['/N'].get_object(), reader).operations
+                                   if op == b'Tj')
+                    self.assertEqual(text, 'Tenant Maddy v. Maddy')
                     count+=1
                 self.assertNotEqual(widget.get('/T'),'RESET FORM')
         self.assertEqual(count,2)
@@ -47,6 +51,22 @@ class RetainerRouteTests(unittest.TestCase):
             self.assertEqual(client.post('/test-retainer-draft',json=RetainerDraftTests().plan(),headers=headers).status_code,200)
 
 class GeneralRetainerTests(unittest.TestCase):
+    def test_explicit_notice_only_preparation_needs_no_eviction_record(self):
+        from retainer_draft import render_retainer_draft
+        result = render_retainer_draft({**self.plan(), 'case_source': 'notice_only', 'eviction_id': None})
+        self.assertIsNone(result['eviction_id'])
+        self.assertEqual(result['case_source'], 'notice_only')
+        self.assertEqual(result['preparation_version'], 'retainer-notice-or-eviction-2026-11-11')
+        self.assertEqual(result['fields']['SHORT CASE NAME'], self.plan()['case_name'])
+        self.assertFalse(result['sent'])
+        self.assertFalse(result['approved'])
+
+    def test_notice_only_cannot_impersonate_a_linked_eviction(self):
+        from retainer_draft import render_retainer_draft
+        for extra in ({'eviction_id': None}, {'case_source': 'unknown'}, {'case_source': 'notice_only'}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                render_retainer_draft({**self.plan(), **extra})
+
     def test_case_snapshot_does_not_require_a_signed_notice(self):
         from retainer_draft import render_retainer_draft
         plan = self.plan()
@@ -74,7 +94,7 @@ class GeneralRetainerTests(unittest.TestCase):
 
     def test_reject_missing_case_unsupported_county_and_invalid_money(self):
         from retainer_draft import render_retainer_draft
-        for key, value in [('case_folder_id', ''), ('county', 'San Mateo'),
+        for key, value in [('case_folder_id', ''), ('county', 'Unreviewed County'),
                            ('retainer_price', 'NaN'), ('retainer_price', -1),
                            ('retainer_price', '3500.001'), ('conflicting_inputs', ['owner'])]:
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
@@ -92,3 +112,237 @@ class GeneralRetainerTests(unittest.TestCase):
             self.assertEqual(client.post('/retainer-draft', json=self.plan()).status_code, 401)
             self.assertEqual(client.post('/retainer-draft', json=self.plan(), headers={
                 'x-narnia-retainer-secret': 'test-only-secret'}).status_code, 200)
+
+
+class VerificationFieldsTests(unittest.TestCase):
+    def test_scaled_vested_owner_has_valid_visible_pdf_appearance(self):
+        import io
+        import re
+        from pypdf import PdfReader
+        result = self.render(capacity='agent', plaintiff_name='Example Property Holdings LLC',
+                             printed_name='Fictional Agent', title='Property Manager')
+        self.assertEqual(result['appearance_version'], 'retainer-office-appearance-2026-11-16-v4')
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        widget = next(ref.get_object() for ref in saved.pages[2]['/Annots']
+                      if ref.get_object().get('/T') == 'VERIFICATION VESTED OWNER')
+        appearance = widget['/AP']['/N'].get_object().get_data()
+        for word in (b'Example', b'Property', b'Holdings', b'LLC'):
+            self.assertIn(word, appearance)
+        self.assertIsNone(re.search(rb'[-+]?\d+(?:\.\d+)?[eE][-+]?\d+', appearance))
+        self.assertEqual(saved.get_fields()['VERIFICATION VESTED OWNER']['/V'],
+                         'Example Property Holdings LLC')
+
+    def render(self, **office):
+        from retainer_draft import render_retainer_draft
+        return render_retainer_draft({**GeneralRetainerTests().plan(), 'verification': {
+            'capacity': 'plaintiff', 'printed_name': 'Maddy Test Owner', 'title': 'Owner',
+            'execution_county': 'Santa Clara', 'payment_method': 'check',
+            'source': 'Fictional owner fixture confirmed by Kwame', **office}})
+
+    def test_complete_office_fields_are_saved_with_appearances(self):
+        import io
+        from pypdf import PdfReader
+        result = self.render()
+        self.assertTrue(result['office_fields_complete'])
+        self.assertEqual(result['missing_office_fields'], [])
+        self.assertEqual(result['fields']['PAPERCHECK'], 'X')
+        self.assertEqual(result['fields']['CREDITCARD'], '')
+        self.assertFalse(result['approved'])
+        self.assertFalse(result['sent'])
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        fields = saved.get_fields()
+        for name, value in result['fields'].items():
+            self.assertEqual(fields[name]['/V'], value)
+        widgets = [ref.get_object() for ref in saved.pages[2]['/Annots']]
+        for widget in widgets:
+            self.assertTrue(widget['/AP']['/N'].get_object().get_data())
+        self.assertEqual(fields['VERIFICATION PRINTED NAME']['/V'], 'Maddy Test Owner')
+        self.assertEqual(fields['VERIFICATION COUNTY']['/V'], 'Santa Clara')
+        self.assertFalse(any('SIGNATURE' in name or 'DATE' in name for name in fields))
+
+    def test_each_supported_capacity_marks_only_its_own_lines(self):
+        options = ['plaintiff', 'agent', 'llc_member', 'general_partner',
+                   'limited_partner', 'trustee', 'successor_trustee']
+        for capacity in options:
+            with self.subTest(capacity=capacity):
+                extra = {'capacity': capacity}
+                if capacity == 'agent':
+                    extra['plaintiff_name'] = 'Fictional Owner'
+                elif capacity != 'plaintiff':
+                    extra['entity_name'] = 'Fictional Entity'
+                result = self.render(**extra)
+                self.assertTrue(result['office_fields_complete'])
+                marks = [k for k, v in result['fields'].items()
+                         if k.startswith('VERIFICATION CAPACITY') and v]
+                self.assertEqual(len(marks), 1)
+                self.assertEqual(marks[0], 'VERIFICATION CAPACITY ' + (
+                    'PARTNERSHIP' if capacity in ('general_partner', 'limited_partner') else capacity.upper()))
+                entities = [v for k, v in result['fields'].items()
+                            if k.startswith('VERIFICATION ENTITY') and v]
+                self.assertEqual(len(entities), int(capacity not in ('agent', 'plaintiff')))
+
+    def test_missing_office_data_never_claims_ready_for_signature(self):
+        result = self.render(capacity='', printed_name='', title='', execution_county='', payment_method='')
+        self.assertFalse(result['office_fields_complete'])
+        self.assertEqual(set(result['missing_office_fields']),
+                         {'capacity', 'printed_name', 'title', 'execution_county', 'payment_method'})
+        result = self.render(capacity='agent')
+        self.assertIn('plaintiff_name', result['missing_office_fields'])
+
+    def test_trustee_long_entity_keeps_full_value_and_twelve_point_appearance(self):
+        import io
+        from pypdf import PdfReader
+        entity = 'David P. Blouin and Mona-Lisa M. Blouin Inter Vivos Trust dated November 6, 2000'
+        result = self.render(capacity='trustee', printed_name='Mona-Lisa Blouin',
+                             title='Trustee', entity_name=entity, execution_county='')
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        key = 'VERIFICATION ENTITY TRUSTEE'
+        self.assertEqual(saved.get_fields()[key]['/V'], entity)
+        widget = next(ref.get_object() for ref in saved.pages[2]['/Annots']
+                      if ref.get_object().get('/T') == key)
+        self.assertEqual(str(widget['/DA']), '/TimesNewRoman 12.0000 Tf 0 g')
+        self.assertTrue(int(widget['/Ff']) & 4096)
+        self.assertEqual(result['fields']['VERIFICATION COUNTY'], '')
+        self.assertEqual(result['missing_office_fields'], ['execution_county'])
+        self.assertEqual(result['state'], 'unsigned_draft_for_review')
+        self.assertFalse(result['sent'])
+
+    def test_bad_or_unsourced_values_are_rejected(self):
+        for extra in [{'source': ''}, {'capacity': 'son'}, {'entity_name': 'Wrong Entity'},
+                      {'printed_name': 'Name\nInjected'}, {'payment_method': 'wire'},
+                      {'printed_name': 'Extremely Long Name ' * 30}, {'signed_date': 'today'}]:
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.render(**extra)
+
+    def test_original_page_contents_and_signature_lines_are_unchanged(self):
+        import io
+        from pypdf import PdfReader
+        from retainer_draft import TEMPLATE
+        source = PdfReader(TEMPLATE)
+        saved = PdfReader(io.BytesIO(base64.b64decode(self.render()['pdf_base64'])))
+        self.assertEqual(len(saved.pages), 3)
+        for old, new in zip(source.pages, saved.pages):
+            self.assertEqual(old.get_contents().get_data(), new.get_contents().get_data())
+
+    def test_comments_removed_and_populated_text_uses_consistent_typeface(self):
+        import io
+        from pypdf import PdfReader
+        result = self.render(capacity='agent', plaintiff_name='Example Holdings LLC')
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        for page in saved.pages:
+            for ref in page.get('/Annots', []):
+                widget = ref.get_object()
+                self.assertIn(widget.get('/Subtype'), ('/Widget', '/Link'))
+                field = widget.get('/Parent', widget).get_object()
+                name = field.get('/T', '')
+                if name in result['fields'] and result['fields'][name] and name not in ('PAPERCHECK', 'CREDITCARD') and not name.startswith(('VERIFICATION CAPACITY', 'VERIFICATION PARTNERSHIP')):
+                    self.assertEqual(str(widget.get('/DA') or field['/DA']), '/TimesNewRoman 12 Tf 0 g' if not name.startswith('VERIFICATION') else '/TimesNewRoman 12.0000 Tf 0 g')
+
+    def test_all_three_pages_have_client_signature_and_date_coordinates(self):
+        result = self.render()
+        self.assertFalse(result['signature_request_created'])
+        fields = result['signing_fields']
+        self.assertEqual(len(fields), 6)
+        for page in (1, 2, 3):
+            self.assertEqual({f['type'] for f in fields if f['page'] == page}, {'signature', 'date_signed'})
+        for field in fields:
+            self.assertTrue(field['required'])
+            self.assertEqual(field['signer'], 0)
+            self.assertEqual(field['document_index'], 0)
+            for coordinate in ('x', 'y', 'width', 'height'):
+                self.assertIsInstance(field[coordinate], int)
+            self.assertLessEqual(field['x'] + field['width'], 612)
+            self.assertLessEqual(field['y'] + field['height'], 792)
+        self.assertEqual(fields[0]['width'], round(154 * 80 / 72 + 2))
+        self.assertEqual(fields[0]['height'], round(21 * 80 / 72))
+
+
+class FirstPageCaseLayoutTests(unittest.TestCase):
+    def test_three_case_rows_do_not_overlap_or_clip_the_apartment(self):
+        import io
+        from pypdf import PdfReader
+        from retainer_draft import render_retainer_draft
+        plan = {**GeneralRetainerTests().plan(), 'case_name': 'Blouin v. Segoviano',
+                'tenant_names': 'Gaspar Segoviano, Blanca Morzon, Kevin Segoviano Morzon.',
+                'property_address': '2069 Radio Ave, Apt 4, San Jose, CA 95125'}
+        result = render_retainer_draft(plan)
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        rows = []
+        for ref in saved.pages[0]['/Annots']:
+            widget = ref.get_object()
+            name = widget.get('/Parent', widget).get_object().get('/T')
+            if name not in ('SHORT CASE NAME', 'DEFENDANT', 'DEFENDANT STREET ADDRESS'):
+                continue
+            rect = [float(v) for v in widget['/Rect']]
+            rows.append(rect)
+            self.assertGreater(rect[1], 644.90)  # Original blue bottom rule.
+            self.assertLess(rect[3], 683.15)    # Original top rule.
+            appearance = widget['/AP']['/N'].get_object().get_data()
+            self.assertIn(b'/TimesNewRoman 12 Tf', appearance)
+            self.assertIn(b'2 3 Td', appearance)  # Descenders have real space.
+            value = result['fields'][name]
+            self.assertEqual(saved.get_fields()[name]['/V'], value)
+            self.assertEqual(widget['/V'], value)
+            self.assertIn(value.encode('cp1252').hex().encode(), appearance)
+        self.assertEqual(len(rows), 3)
+        rows.sort(key=lambda r: r[1])
+        for lower, upper in zip(rows, rows[1:]):
+            self.assertLessEqual(lower[3], upper[1] + .001)
+        self.assertEqual(saved.metadata['/MaddyRetainerDraftRecord'], plan['record_id'])
+        self.assertEqual(saved.metadata['/MaddyRetainerReviewOnly'], 'unsigned')
+
+    def test_text_that_cannot_fit_never_silently_overlays_or_truncates(self):
+        from retainer_draft import render_retainer_draft
+        with self.assertRaisesRegex(ValueError, 'exceeds its first-page row'):
+            render_retainer_draft({**GeneralRetainerTests().plan(),
+                                   'tenant_names': 'Very Long Tenant Name ' * 30})
+
+
+class CommonCountyFormTests(unittest.TestCase):
+    def test_reviewed_counties_change_both_printed_references_and_canonical_field(self):
+        import io
+        from pypdf import PdfReader
+        from retainer_draft import render_retainer_draft, SUPPORTED_COUNTIES
+        for county in SUPPORTED_COUNTIES:
+            with self.subTest(county=county):
+                result = render_retainer_draft({**GeneralRetainerTests().plan(), 'county': county + ' County'})
+                saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+                self.assertEqual(result['property_county'], county)
+                self.assertEqual(saved.get_fields()['COUNTY OF']['/V'], county)
+                text = saved.pages[0].extract_text()
+                self.assertEqual(text.count(county + ' County'), 2)
+                if county != 'Santa Clara':
+                    self.assertNotIn('Santa Clara', text)
+                self.assertEqual(len(saved.pages), 3)
+                self.assertFalse(result['sent'])
+
+    def test_new_county_text_keeps_source_font_and_other_pages(self):
+        import io
+        from pypdf import PdfReader
+        from retainer_draft import render_retainer_draft, TEMPLATE
+        source = PdfReader(TEMPLATE)
+        result = render_retainer_draft({**GeneralRetainerTests().plan(), 'county': 'Santa Cruz'})
+        saved = PdfReader(io.BytesIO(base64.b64decode(result['pdf_base64'])))
+        for old, new in zip(source.pages[1:], saved.pages[1:]):
+            self.assertEqual(old.get_contents().get_data(), new.get_contents().get_data())
+        resources = saved.pages[0]['/Resources']['/XObject']
+        changed = []
+        for obj in resources.values():
+            form = obj.get_object()
+            res = form.get('/Resources')
+            if not res:
+                continue
+            fonts = res.get_object().get('/Font')
+            if fonts and '/RetainerCounty' in fonts.get_object():
+                changed.append(form)
+        self.assertEqual(len(changed), 2)
+        for obj in changed:
+            self.assertIn('Inter-Regular', obj['/Resources']['/Font']['/RetainerCounty']['/BaseFont'])
+
+    def test_county_is_case_insensitive_but_never_guessed(self):
+        from retainer_draft import render_retainer_draft
+        result = render_retainer_draft({**GeneralRetainerTests().plan(), 'county': ' san mateo COUNTY '})
+        self.assertEqual(result['property_county'], 'San Mateo')
+        for value in ('', None, 'San Jose', 'Alameda', 'Narnia County'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                render_retainer_draft({**GeneralRetainerTests().plan(), 'county': value})

@@ -19,7 +19,7 @@ from pypdf.generic import (
 
 from residential_notice import NoticeInputError, REFERENCE_SHA256, fields_for_case
 
-PDF_TEMPLATE_VERSION = "residential-original-pdf-2026-11-03-font5"
+PDF_TEMPLATE_VERSION = "residential-original-pdf-2026-11-04-font6"
 MASTER_SHA256 = "cf06f18af3bc79720a91a99afbcd84c5214aa613aa63608feb10508ff0ef989a"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-original.pdf"
 WIDTHS = json.loads((MASTER.parent / "residential-pdf-font-widths.json").read_text())
@@ -67,21 +67,23 @@ def _lines(text, width, font, multiline):
         if _width(text, font) > width - 4:
             raise NoticeInputError("A case field exceeds its original PDF box; human review required")
         return [text]
-    lines = [""]
-    for word in text.split():
-        if _width(word, font) > width - 4:
-            raise NoticeInputError("A case field contains a word wider than its original PDF box")
-        candidate = (lines[-1] + " " + word).strip()
-        if _width(candidate, font) > width - 4:
-            if len(lines) == 2:
-                raise NoticeInputError("A case field exceeds the original two-line PDF box; human review required")
-            lines.append(word)
-        else:
-            lines[-1] = candidate
+    lines = []
+    for paragraph in text.split("\n"):
+        lines.append("")
+        for word in paragraph.split():
+            if _width(word, font) > width - 4:
+                raise NoticeInputError("A case field contains a word wider than its original PDF box")
+            candidate = (lines[-1] + " " + word).strip()
+            if _width(candidate, font) > width - 4:
+                lines.append(word)
+            else:
+                lines[-1] = candidate
+        if len(lines) > 2:
+            raise NoticeInputError("A case field exceeds the original two-line PDF box; human review required")
     return lines
 
 
-def _appearance(writer, widget, field, text, fonts):
+def _appearance(writer, widget, field, text, fonts, baseline_shift=0, leading=14.4):
     x0, y0, x1, y1 = map(float, widget["/Rect"])
     width, height = x1 - x0, y1 - y0
     da = str(widget.get("/DA", field.get("/DA")))
@@ -101,11 +103,12 @@ def _appearance(writer, widget, field, text, fonts):
         # Align the entered date with both the fixed Date: caption and the
         # signature caption, whose approved baseline is y=296.57 points.
         baseline = 296.57 - y0
+    baseline += baseline_shift
     parts = [f"/Tx BMC\nq\n1 1 {width-2:.6f} {height-2:.6f} re W n\nBT\n/{font} 12 Tf\n0 g\n"]
     for i, line in enumerate(lines):
         # Q=1 means centered within this fixed box, not centered on the page.
         x = (width - _width(line, font)) / 2 if widget.get("/Q", field.get("/Q")) == 1 else 2
-        y = baseline - i * 14.4
+        y = baseline - i * leading
         parts.append(f"1 0 0 1 {x:.6f} {y:.6f} Tm\n<{_bytes(line).hex()}> Tj\n")
     parts.append("ET\nQ\nEMC\n")
     ap = DecodedStreamObject()
@@ -206,6 +209,22 @@ def _render_original(values, template_path=MASTER):
     end = 179.905 + _width("TIME PERIOD DUE", "TiBo")
     heading_stream.set_data(stream.get_data() + f"\nq 0 G 0.6 w 179.905 467.2 m {end:.6f} 467.2 l S Q\n".encode())
     page[NameObject("/Contents")] = writer._add_object(heading_stream)
+    provider_extra = values["PROVIDER_STREET"].count("\n") * 14.0
+    if provider_extra:
+        # The provider contact ends the document. Use its existing spare height
+        # for a second 12pt street line; move the city and phone together.
+        page = writer.pages[1]
+        stream = ContentStream(page.get_contents(), writer)
+        moved = 0
+        for operands, op in stream.operations:
+            if (op == b"Td" and len(operands) == 2
+                    and abs(float(operands[0])-216.648)<.001
+                    and abs(float(operands[1])-196.218)<.001):
+                operands[1] = FloatObject(float(operands[1])-provider_extra)
+                moved += 1
+        if moved != 1:
+            raise RuntimeError("Approved housing-provider phone caption changed")
+        page[NameObject("/Contents")] = writer._add_object(stream)
     fields, seen = form["/Fields"], set()
     updated = {}
     for page_no, page in enumerate(writer.pages, 1):
@@ -242,7 +261,20 @@ def _render_original(values, template_path=MASTER):
             font = "TiBo" if key == "TOTAL_AMOUNT" else "TiRo"
             field[NameObject("/DA")] = TextStringObject(f"/{font} 12 Tf 0 g")
             widget[NameObject("/DA")] = TextStringObject(f"/{font} 12 Tf 0 g")
-            _appearance(writer, widget, field, text, fonts)
+            shift = 0
+            if page_no == 2 and provider_extra:
+                rect = list(map(float, widget["/Rect"]))
+                if key == "PROVIDER_STREET":
+                    rect[1] -= provider_extra
+                    flags = NumberObject(int(widget.get("/Ff", field.get("/Ff", 0))) | 4096)
+                    field[NameObject("/Ff")] = flags
+                    widget[NameObject("/Ff")] = flags
+                    shift = provider_extra
+                elif key in {"PROVIDER_CITY", "PROVIDER_PHONE"}:
+                    rect[1] -= provider_extra
+                    rect[3] -= provider_extra
+                widget[NameObject("/Rect")] = ArrayObject([FloatObject(v) for v in rect])
+            _appearance(writer, widget, field, text, fonts, shift, 14.0 if shift else 14.4)
     if seen != set(FIELD_MAP):
         raise RuntimeError("Original PDF field map is incomplete")
     form[NameObject("/Fields")] = fields

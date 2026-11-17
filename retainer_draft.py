@@ -2,14 +2,347 @@
 import base64
 import hashlib
 import io
+import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject, TextStringObject, ArrayObject
+from pypdf._cmap import build_char_map
+from pypdf.generic import (NameObject, TextStringObject, ArrayObject,
+                           DictionaryObject, NumberObject, RectangleObject,
+                           ByteStringObject, ContentStream, DecodedStreamObject, FloatObject)
 
 TEMPLATE = Path(__file__).parent / 'templates' / 'santa_clara_retainer.pdf'
 TEMPLATE_SHA = '20457475f9728c3ebf29196414fc20d4006a3e6134315906cce5e6b4ea450927'
 NOTICE_SHA = '202cfbd160a62f7afa74e25983d4389fb4e396ddfd207d025bade463095876e4'
+VERIFICATION_VERSION = 'retainer-office-fields-2026-11-10'
+APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-16-v4'
+SIGNING_FIELDS_VERSION = 'retainer-six-signing-fields-2026-11-11-v2'
+COUNTY_VERSION = 'retainer-common-county-form-2026-11-10'
+PREPARATION_VERSION = 'retainer-notice-or-eviction-2026-11-11'
+SUPPORTED_COUNTIES = ('Santa Clara', 'Santa Cruz', 'San Benito', 'San Mateo')
+
+
+def _align_first_page_case_labels(writer):
+    """Move only the three printed labels to the corrected input baselines."""
+    forms = writer.pages[0]['/Resources']['/XObject']
+    # Source font sizes are transformed by the template's nested matrices.
+    # These are measured page-coordinate baseline corrections, not font edits.
+    for key, scale, shifts in (
+        ('/X55', 8.500574111938477 / 12, {12: -2.80221252441406}),
+        ('/X56', 8.000099182128906 / 12,
+         {12: -1.34722290039062, 28: .18596801757812}),
+    ):
+        form = forms[key].get_object()
+        stream = ContentStream(form, writer)
+        for args, operator in stream.operations:
+            if operator == b'Tm':
+                y = float(args[5])
+                if y not in shifts:
+                    raise ValueError('First-page case label layout changed')
+                args[5] = FloatObject(y + shifts[y] / scale)
+        replacement = DecodedStreamObject()
+        replacement.update({k: v for k, v in form.items()
+                            if k not in ('/Filter', '/DecodeParms', '/Length')})
+        replacement.set_data(stream.get_data())
+        forms[NameObject(key)] = writer._add_object(replacement)
+
+
+def _first_page_case_appearance(writer, widget, name, value):
+    """Three measured rows inside the original case box, in PDF points.
+
+    The source's 10pt widgets overlap and their baselines drift downwards.
+    Growing their tops for 12pt text does not fix that. Give each input its
+    own row and a real descender allowance instead of pypdf's near-zero
+    baseline. The approved page content, borders and later pages stay intact.
+    """
+    rows = {'SHORT CASE NAME': (115.4, 673.22),
+            'DEFENDANT': (102.2, 661.02),
+            'DEFENDANT STREET ADDRESS': (98.1, 648.82)}
+    if name not in rows:
+        return
+    left, baseline = rows[name]
+    bottom, top, right = baseline - 3, baseline + 9.2, 550
+    font_ref = writer._root_object['/AcroForm']['/DR']['/Font']['/TimesNewRoman']
+    font = font_ref.get_object()
+    try:
+        encoded = value.encode('cp1252')
+    except UnicodeEncodeError:
+        raise ValueError('Case text is outside the template font: ' + name)
+    widths, first = font['/Widths'], int(font['/FirstChar'])
+    if any(ord(c) < 32 for c in value):
+        raise ValueError('Case field must contain one display line: ' + name)
+    if sum(float(widths[c - first]) for c in encoded) * 12 / 1000 > right - left - 4:
+        raise ValueError('Case text exceeds its first-page row: ' + name)
+    widget[NameObject('/Rect')] = RectangleObject((left, bottom, right, top))
+    # Fixed single-line typography; both the saved appearance and an editor
+    # see the same 12pt font and non-overlapping field rectangles.
+    widget[NameObject('/Ff')] = NumberObject(0)
+    ap = DecodedStreamObject()
+    ap.update({NameObject('/Type'): NameObject('/XObject'),
+               NameObject('/Subtype'): NameObject('/Form'),
+               NameObject('/BBox'): RectangleObject((0, 0, right - left, top - bottom)),
+               NameObject('/Resources'): DictionaryObject({NameObject('/Font'):
+                   DictionaryObject({NameObject('/TimesNewRoman'): font_ref})})})
+    ap.set_data((f'q /Tx BMC BT /TimesNewRoman 12 Tf 0 g 2 3 Td '
+                 f'<{encoded.hex()}> Tj ET EMC Q\n').encode('ascii'))
+    widget[NameObject('/AP')] = DictionaryObject({NameObject('/N'): writer._add_object(ap)})
+
+
+def _property_county(value):
+    if not isinstance(value, str):
+        raise ValueError('Supported property county required')
+    normalized = re.sub(r'\s+county$', '', value.strip(), flags=re.I).casefold()
+    for county in SUPPORTED_COUNTIES:
+        if county.casefold() == normalized:
+            return county
+    raise ValueError('Property county is outside the reviewed business county configuration')
+
+
+def _cid_widths(font):
+    descendant = font['/DescendantFonts'][0].get_object()
+    source, widths, i = descendant['/W'], {}, 0
+    while i < len(source):
+        first, second = int(source[i]), source[i + 1]
+        i += 2
+        if isinstance(second, list):
+            widths.update({first + j: float(width) for j, width in enumerate(second)})
+        else:
+            width = float(source[i])
+            i += 1
+            widths.update({j: width for j in range(first, int(second) + 1)})
+    return widths
+
+
+def _fill_printed_county(writer, county):
+    """AM June26 12:26: one agreement covers her counties; county is case data.
+
+    Replace only the two source county runs. Reuse the exact embedded Inter
+    font from page 2, whose subset includes the z needed by Santa Cruz. Keep
+    all source text matrices; adjust the following space by the measured
+    word-width difference. No redaction, overlay, font substitution or reflow.
+    """
+    if county == 'Santa Clara':
+        return
+    county_font = writer.pages[1]['/Resources']['/Font']['/F19']
+    info = build_char_map('/F19', 200, writer.pages[1])
+    reverse = {text: code for code, text in info[3].items()
+               if isinstance(code, str) and isinstance(text, str) and len(text) == 1}
+    if info[2] != 'utf-16-be' or any(c not in reverse for c in county):
+        raise ValueError('Original county font cannot represent this county')
+    encoded = ''.join(reverse[c] for c in county).encode('utf-16-be')
+    widths = _cid_widths(county_font.get_object())
+    xobjects = writer.pages[0]['/Resources']['/XObject']
+    replaced = 0
+    for key, ref in list(xobjects.items()):
+        form = ref.get_object()
+        if form.get('/Subtype') != '/Form' or '/Font' not in form.get('/Resources', {}):
+            continue
+        maps = {name: build_char_map(name, 200, form) for name in form['/Resources']['/Font']}
+        stream = ContentStream(form, writer)
+        flat, positions, font, size = '', [], None, None
+        for index, (args, operator) in enumerate(stream.operations):
+            if operator == b'Tf':
+                font, size = str(args[0]), float(args[1])
+            if operator != b'Tj':
+                continue
+            value = args[0]
+            raw = value.original_bytes if hasattr(value, 'original_bytes') else bytes(value)
+            encoding, cmap = maps[font][2:4]
+            text = raw.decode(encoding) if isinstance(encoding, str) else ''.join(encoding[c] for c in raw)
+            text = ''.join(cmap.get(c, c) for c in text)
+            for char in text:
+                flat += char
+                positions.append((index, font, size, len(text)))
+        matches = list(re.finditer(r'Santa\s+Clara', flat))
+        if not matches:
+            continue
+        if len(matches) != 1:
+            raise ValueError('Source county layout changed')
+        match = matches[0]
+        run = positions[match.start():match.end()]
+        first, old_font, size, _ = run[0]
+        last = run[-1][0]
+        if any(f != old_font or s != size or length != 1 for _, f, s, length in run):
+            raise ValueError('Source county glyph run changed')
+        following, operator = stream.operations[last + 1]
+        region = stream.operations[first + 1:last + 2]
+        if operator != b'Td' or float(following[1]) != 0 or any(op not in (b'Td', b'Tj') for _, op in region):
+            raise ValueError('Source county spacing changed')
+        old_width = sum(float(args[0]) for args, op in region if op == b'Td')
+        new_width = sum(widths[ord(reverse[c])] for c in county) * size / 1000
+        if new_width > old_width + .1:
+            raise ValueError('County exceeds its source text allocation')
+        following[0] = FloatObject(float(following[0]) + new_width - old_width)
+        old_indices = {index for index, _, _, _ in run}
+        operations = []
+        for index, operation in enumerate(stream.operations):
+            if index == first:
+                operations += [([NameObject('/RetainerCounty'), FloatObject(size)], b'Tf'),
+                               ([ByteStringObject(encoded)], b'Tj'),
+                               ([NameObject(old_font), FloatObject(size)], b'Tf')]
+            elif index not in old_indices:
+                operations.append(operation)
+        stream.operations = operations
+        form['/Resources']['/Font'][NameObject('/RetainerCounty')] = county_font
+        replacement = DecodedStreamObject()
+        replacement.update({k: v for k, v in form.items() if k not in ('/Filter', '/DecodeParms', '/Length')})
+        replacement.set_data(stream.get_data())
+        xobjects[key] = writer._add_object(replacement)
+        replaced += 1
+    if replaced != 2:
+        raise ValueError('Expected both printed source county references')
+
+
+def _verification_values(plan):
+    """Only explicit, sourced office facts; signatures and dates stay empty."""
+    office = plan.get('verification') or {}
+    allowed = {'capacity', 'printed_name', 'title', 'plaintiff_name',
+               'entity_name', 'execution_county', 'payment_method', 'source'}
+    if not isinstance(office, dict) or set(office) - allowed:
+        raise ValueError('Invalid verification fields')
+    for key, value in office.items():
+        if not isinstance(value, str) or any(ord(c) < 32 for c in value):
+            raise ValueError('Invalid verification value: ' + key)
+    office = {key: value.strip() for key, value in office.items()}
+    if any(value for key, value in office.items() if key != 'source') and not office.get('source'):
+        raise ValueError('Verification facts require their source')
+    capacity = office.get('capacity', '')
+    capacities = {'plaintiff', 'agent', 'llc_member', 'general_partner',
+                  'limited_partner', 'trustee', 'successor_trustee'}
+    if capacity and capacity not in capacities:
+        raise ValueError('Unsupported verification capacity')
+    if office.get('payment_method', '') not in ('', 'check', 'card'):
+        raise ValueError('Unsupported payment method')
+    if office.get('plaintiff_name') and capacity != 'agent':
+        raise ValueError('Vested owner line applies to the agent capacity')
+    entity_capacities = {'llc_member', 'general_partner', 'limited_partner',
+                         'trustee', 'successor_trustee'}
+    if office.get('entity_name') and capacity not in entity_capacities:
+        raise ValueError('Entity name requires its supported capacity')
+    missing = [key for key in ('capacity', 'printed_name', 'title', 'execution_county', 'payment_method')
+               if not office.get(key)]
+    if capacity == 'agent' and not office.get('plaintiff_name'):
+        missing.append('plaintiff_name')
+    if capacity in entity_capacities and not office.get('entity_name'):
+        missing.append('entity_name')
+    # Fixed coordinates measured from AM's unchanged verification page.
+    # Each rectangle sits above its existing line; no legal text is replaced.
+    fields = {
+        'VERIFICATION PRINTED NAME': (office.get('printed_name', ''), (174, 92, 312, 105), 12),
+        'VERIFICATION TITLE': (office.get('title', ''), (102, 64.5, 312, 77.5), 12),
+        'VERIFICATION COUNTY': (office.get('execution_county', ''), (445, 195.5, 527, 208.5), 12),
+        'VERIFICATION VESTED OWNER': (office.get('plaintiff_name', ''), (387, 552.5, 540, 565.5), 12),
+    }
+    for key, y in {'plaintiff': 634.86, 'agent': 607.26, 'llc_member': 524.47,
+                   'partnership': 469.28, 'trustee': 414.07,
+                   'successor_trustee': 372.68}.items():
+        selected = capacity == key or (key == 'partnership' and capacity in
+                                      ('general_partner', 'limited_partner'))
+        fields['VERIFICATION CAPACITY ' + key.upper()] = ('X' if selected else '',
+                                                          (107, y + .5, 119, y + 11.5), 10)
+    entity = office.get('entity_name', '')
+    for key, rect in {
+        'llc_member': (253, 497.4, 535, 510.4),
+        'general_partner': (339, 456, 535, 469),
+        'limited_partner': (339, 442.2, 535, 455.2),
+        'trustee': (238, 400.8, 535, 413.8),
+        'successor_trustee': (238, 359.4, 535, 372.4),
+    }.items():
+        fields['VERIFICATION ENTITY ' + key.upper()] = (entity if capacity == key else '', rect, 12)
+    for key, y in [('general_partner', 455.47), ('limited_partner', 441.68)]:
+        fields['VERIFICATION PARTNERSHIP ' + key.upper()] = (
+            'X' if capacity == key else '', (180, y + .5, 192, y + 11.5), 10)
+    return office, fields, missing
+
+
+def _add_verification_fields(writer, definitions):
+    form = writer._root_object['/AcroForm']
+    font = form['/DR']['/Font']['/TimesNewRoman'].get_object()
+    first, widths = int(font['/FirstChar']), font['/Widths']
+    page = writer.pages[2]
+    if '/Annots' not in page:
+        page[NameObject('/Annots')] = ArrayObject()
+    for name, (value, rect, size) in definitions.items():
+        try:
+            encoded = value.encode('cp1252')
+        except UnicodeEncodeError:
+            raise ValueError('Verification text is outside the template font: ' + name)
+        units = sum(float(widths[c - first]) for c in encoded)
+        width = rect[2] - rect[0] - 4
+        display = value
+        line_count = 1
+        if units * size / 1000 > width:
+            if name not in ('VERIFICATION VESTED OWNER', 'VERIFICATION ENTITY TRUSTEE',
+                            'VERIFICATION ENTITY SUCCESSOR_TRUSTEE'):
+                raise ValueError('Verification text exceeds its allocated line: ' + name)
+            # Keep the selected font size. There is one blank line below the
+            # vested-owner allocation, before the next capacity paragraph.
+            lines = ['']
+            for word in value.split():
+                trial = (lines[-1] + ' ' + word).strip()
+                trial_width = sum(float(widths[c - first]) for c in trial.encode('cp1252')) * size / 1000
+                if trial_width <= width:
+                    lines[-1] = trial
+                else:
+                    if not lines[-1]:
+                        raise ValueError('Verification text exceeds its allocated line: ' + name)
+                    lines.append(word)
+            if len(lines) > 2 or any(sum(float(widths[c-first]) for c in line.encode('cp1252')) * size / 1000 > width for line in lines):
+                raise ValueError('Verification text exceeds its allocated line: ' + name)
+            display, line_count = '\n'.join(lines), len(lines)
+        # pypdf puts the baseline at top - font size - 1. Keep that baseline
+        # at the source line when a long supported name needs a smaller font.
+        # pypdf rounds /DA font size to four places. An exactly zero-height
+        # baseline can then become e.g. 1.4e-05 in its appearance stream,
+        # which is not a valid PDF number and makes a scaled name invisible.
+        # A 0.01pt baseline allowance avoids that cancellation without moving
+        # any source content or signature line.
+        rect = (rect[0], rect[1] - (line_count - 1) * size * 1.4,
+                rect[2], rect[1] + size + 1.01)
+        widget = DictionaryObject({
+            NameObject('/Type'): NameObject('/Annot'),
+            NameObject('/Subtype'): NameObject('/Widget'),
+            NameObject('/FT'): NameObject('/Tx'),
+            NameObject('/T'): TextStringObject(name),
+            NameObject('/Rect'): RectangleObject(rect),
+            NameObject('/DA'): TextStringObject(f'/TimesNewRoman {size:.4f} Tf 0 g'),
+            NameObject('/V'): TextStringObject(value),
+            NameObject('/F'): NumberObject(4),
+            NameObject('/P'): page.indirect_reference,
+        })
+        ref = writer._add_object(widget)
+        page['/Annots'].append(ref)
+        form['/Fields'].append(ref)
+        if line_count > 1:
+            widget[NameObject('/Ff')] = NumberObject(4096)
+            widget[NameObject('/V')] = TextStringObject(display)
+        writer._update_text_field(widget)
+        widget[NameObject('/V')] = TextStringObject(value)
+
+
+def retainer_signing_fields(pages):
+    """Six existing signature/date lines, in Dropbox Sign top-left PDF points.
+
+    Preparing these coordinates never calls the provider or signs/dates a PDF.
+    Keep the printed lines and body unchanged; the client supplies all six values.
+    """
+    lines = [(1, 'signature', (169, 45, 323, 66)),
+             (1, 'date_signed', (405, 45, 557, 66)),
+             (2, 'signature', (61, 90, 275, 113)),
+             (2, 'date_signed', (332, 88, 546, 111)),
+             (3, 'signature', (77, 120, 312, 143)),
+             (3, 'date_signed', (156, 173, 265, 190))]
+    result = []
+    for number, kind, (left, bottom, right, top) in lines:
+        page = pages[number - 1]
+        # Dropbox uses 72-DPI integer positions, but 80-DPI field dimensions.
+        # https://help.dropbox.com/integrations/how-to-use-the-form-fields-per-document-parameter
+        result.append({'document_index': 0, 'api_id': f'retainer_{kind}_{number}', 'type': kind,
+                       'signer': 0, 'required': True, 'page': number,
+                       'x': left, 'y': round(float(page.mediabox.top) - top),
+                       'width': round((right - left) * 80 / 72 + 2),
+                       'height': round((top - bottom) * 80 / 72)})
+    return result
 
 
 def render_test_retainer(plan):
@@ -39,15 +372,21 @@ def render_retainer_draft(plan):
     """Populate an unsigned Santa Clara agreement from an explicit case plan."""
     if not isinstance(plan, dict):
         raise ValueError('Expected a case plan')
-    required = ['record_id', 'eviction_id', 'case_folder_id', 'case_name',
+    required = ['record_id', 'case_folder_id', 'case_name',
                 'property_address', 'tenant_names']
     for key in required:
         if not isinstance(plan.get(key), str) or not plan[key].strip():
             raise ValueError('Missing case field: ' + key)
+    case_source = plan.get('case_source', 'linked_eviction')
+    eviction_id = plan.get('eviction_id')
+    if case_source == 'notice_only':
+        if eviction_id is not None:
+            raise ValueError('Notice-only preparation must not invent an eviction record')
+    elif case_source != 'linked_eviction' or not isinstance(eviction_id, str) or not eviction_id.strip():
+        raise ValueError('Linked eviction preparation requires its actual record')
     if plan.get('missing_inputs') or plan.get('conflicting_inputs'):
         raise ValueError('Retainer plan unresolved')
-    if plan.get('county') not in ('Santa Clara', 'Santa Clara County'):
-        raise ValueError('No verified retainer template for this county')
+    county = _property_county(plan.get('county'))
     if plan.get('property_type') not in ('residential', 'commercial'):
         raise ValueError('Property type required')
     try:
@@ -61,10 +400,13 @@ def render_retainer_draft(plan):
     template = TEMPLATE.read_bytes()
     if hashlib.sha256(template).hexdigest() != TEMPLATE_SHA:
         raise ValueError('Retainer template changed; review required')
+    office, verification_fields, missing_office = _verification_values(plan)
     values = {
         'SHORT CASE NAME': case_name, 'DEFENDANT': plan['tenant_names'],
-        'DEFENDANT STREET ADDRESS': address, 'COUNTY OF': 'Santa Clara',
-        'TOTAL': f'${amount:,.2f}', 'PAPERCHECK': '', 'CREDITCARD': '',
+        'DEFENDANT STREET ADDRESS': address, 'COUNTY OF': county,
+        'TOTAL': f'${amount:,.2f}',
+        'PAPERCHECK': 'X' if office.get('payment_method') == 'check' else '',
+        'CREDITCARD': 'X' if office.get('payment_method') == 'card' else '',
     }
     reader = PdfReader(io.BytesIO(template))
     fields = reader.get_fields() or {}
@@ -72,10 +414,15 @@ def render_retainer_draft(plan):
         raise ValueError('Retainer fields missing')
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
+    writer.add_metadata({'/MaddyRetainerDraftRecord': plan['record_id'],
+                         '/MaddyRetainerReviewOnly': 'unsigned',
+                         '/MaddyRetainerAppearance': APPEARANCE_VERSION})
+    _fill_printed_county(writer, county)
+    _align_first_page_case_labels(writer)
     # The template repeats SHORT CASE NAME as child widgets. pypdf 4 reads
     # their own value when building appearances, not the parent field value.
     # Set both consistently before generating appearances on every page.
-    for page in writer.pages:
+    for page_index, page in enumerate(writer.pages):
         for ref in page.get('/Annots', []):
             widget = ref.get_object()
             field = widget.get('/Parent', widget).get_object()
@@ -83,12 +430,22 @@ def render_retainer_draft(plan):
             if name in values:
                 widget[NameObject('/V')] = TextStringObject(values[name])
                 widget[NameObject('/FT')] = field.get('/FT', NameObject('/Tx'))
-                widget[NameObject('/DA')] = field.get('/DA', TextStringObject('/Helv 10 Tf 0 g'))
+                # Use the form's embedded Times New Roman for every case input,
+                # instead of the template's mixed Arial/Helvetica defaults.
+                size = 10 if name in ('PAPERCHECK', 'CREDITCARD') else 12
+                appearance = TextStringObject(f'/TimesNewRoman {size} Tf 0 g')
+                widget[NameObject('/DA')] = appearance
+                field[NameObject('/DA')] = appearance
+                if float(widget['/Rect'][3]) - float(widget['/Rect'][1]) < size + 1.01:
+                    rect = list(widget['/Rect'])
+                    rect[3] = float(rect[1]) + size + 1.01
+                    widget[NameObject('/Rect')] = RectangleObject(rect)
                 field[NameObject('/V')] = TextStringObject(values[name])
         # A reset button obscures the header and can wipe a reviewed form.
         page[NameObject('/Annots')] = ArrayObject([
             ref for ref in page.get('/Annots', [])
-            if ref.get_object().get('/T') != 'RESET FORM'])
+            if ref.get_object().get('/T') != 'RESET FORM'
+            and ref.get_object().get('/Subtype') in ('/Widget', '/Link')])
         if '/Annots' in page:
             writer.update_page_form_field_values(page, values, auto_regenerate=False)
             for ref in page['/Annots']:
@@ -98,8 +455,12 @@ def render_retainer_draft(plan):
                 if name in values:
                     widget[NameObject('/V')] = TextStringObject(values[name])
                     writer._update_text_field(widget)
+                    if page_index == 0:
+                        _first_page_case_appearance(writer, widget, name, values[name])
     form = writer._root_object['/AcroForm']
     form[NameObject('/Fields')] = ArrayObject([ref for ref in form['/Fields'] if ref.get_object().get('/T') != 'RESET FORM'])
+    _add_verification_fields(writer, verification_fields)
+    values.update({name: value for name, (value, _rect, _size) in verification_fields.items()})
     output = io.BytesIO()
     writer.write(output)
     pdf = output.getvalue()
@@ -134,14 +495,24 @@ def render_retainer_draft(plan):
     digest = hashlib.sha256(pdf).hexdigest()
     return {
         'test_only': plan.get('test_only') is True, 'record_id': plan['record_id'],
-        'eviction_id': plan['eviction_id'], 'folder_id': plan['case_folder_id'],
+        'eviction_id': eviction_id, 'case_source': case_source,
+        'preparation_version': PREPARATION_VERSION, 'folder_id': plan['case_folder_id'],
         'source_notice_sha256': plan.get('source_notice_sha256'),
         'source_case_sha256': plan.get('source_case_sha256'), 'template_sha256': TEMPLATE_SHA,
         'sha256': digest, 'mime_type': 'application/pdf',
         'filename': ('TEST - ' if plan.get('test_only') is True else '') + 'retainer-draft.pdf',
         'pdf_base64': base64.b64encode(pdf).decode(),
         'fields': values, 'page_count': len(saved.pages),
+        'verification_version': VERIFICATION_VERSION,
+        'appearance_version': APPEARANCE_VERSION,
+        'signing_fields_version': SIGNING_FIELDS_VERSION,
+        'signing_fields': retainer_signing_fields(saved.pages),
+        'signature_request_created': False,
+        'county_version': COUNTY_VERSION, 'property_county': county,
+        'office_fields_complete': not missing_office,
+        'missing_office_fields': missing_office,
+        'verification_source': office.get('source', ''),
         'state': 'unsigned_draft_for_review', 'retainer_price': float(amount),
-        'payment_method': 'not_selected', 'approved': False, 'sent': False,
+        'payment_method': office.get('payment_method') or 'not_selected', 'approved': False, 'sent': False,
         'signed': False, 'payment_verified': False,
     }

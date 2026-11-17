@@ -4,8 +4,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
+import json
 import re
-import unicodedata
 from zoneinfo import ZoneInfo
 
 from docx import Document
@@ -15,6 +15,7 @@ from notice_display import address_display, display_inputs
 TEMPLATE_VERSION = "residential-pay-or-quit-2026-10-30-word-layout4"
 REFERENCE_SHA256 = "0e23f57004a2f9842acaab92a334d46c031a5d09e31f4f3900b91f531418825d"
 MASTER = Path(__file__).parent / "templates/residential-pay-or-quit-2026-10.docx"
+FONT_WIDTHS = json.loads((MASTER.parent / "residential-pdf-font-widths.json").read_text())
 FIXED_RENT_ROWS = 6
 # Resource bound, not a layout limit. Never truncate a submitted schedule.
 MAX_RENT_ROWS = 1000
@@ -39,35 +40,47 @@ def money(value):
         raise NoticeInputError("Invalid rent amount") from exc
 
 
-def text_width(text, size=12):
-    # Conservative Times Roman width bounds; never shrink a case field to fit.
-    # Narrow/wide groups prevent a long string of W/M from slipping through a
-    # simple character-count check. Non-Latin full-width glyphs use a full em.
-    total = 0
-    for c in text:
-        if unicodedata.east_asian_width(c) in {"W", "F"}:
-            em = 1
-        elif c in "MW@%":
-            em = .95
-        elif c in "ilI.,:;'!| ":
-            em = .28
-        elif c.isupper():
-            em = .73
-        elif c.isdigit():
-            em = .5
-        else:
-            em = .56
-        total += em * size
-    return total
-
-
 def fit(value, width, field):
     value = clean(value)
-    if text_width(value) > width - 4:
+    if measured_width(value) > width - 4:
         raise NoticeInputError(f"{field} exceeds the approved form space; human review required")
     if "{{" in value or "}}" in value:
         raise NoticeInputError(f"Invalid template text in {field}")
     return value
+
+
+def measured_width(value):
+    """Use the retained form's actual 12pt Times New Roman advances."""
+    try:
+        codes = value.encode("cp1252")
+    except UnicodeEncodeError as exc:
+        raise NoticeInputError("A case field contains characters unavailable in the approved form font; human review required") from exc
+    return sum(FONT_WIDTHS["TiRo"][code] for code in codes) * 12 / 1000
+
+
+def provider_street_lines(value):
+    """Use the existing provider paragraph's spare height, without shrinking."""
+    value = clean(value)
+    if "{{" in value or "}}" in value:
+        raise NoticeInputError("Invalid template text in Housing-provider street")
+    if measured_width(value) > 371 and re.match(r"c/o\s", value, re.I):
+        # Keep the care-of/attention line above the literal numbered street;
+        # never strand 'Suite' on a different line from its supplied number.
+        parts = re.split(r",\s*(?=\d+\s+\S)", value, maxsplit=1)
+        if len(parts) == 2:
+            parts[0] += ","
+            if all(measured_width(p) <= 371 for p in parts):
+                return "\n".join(parts)
+    lines = [""]
+    for word in value.split():
+        candidate = (lines[-1] + " " + word).strip()
+        if measured_width(candidate) <= 371:
+            lines[-1] = candidate
+        elif len(lines) == 1 and lines[-1] and measured_width(word) <= 371:
+            lines.append(word)
+        else:
+            raise NoticeInputError("Housing-provider street exceeds its approved two-line space; human review required")
+    return "\n".join(lines)
 
 
 def two_lines(value, width, field, first_prefix=""):
@@ -78,12 +91,12 @@ def two_lines(value, width, field, first_prefix=""):
     lines = [""]
     for word in words:
         candidate = (lines[-1] + " " + word).strip()
-        available = width - (text_width(first_prefix) if len(lines) == 1 else 0)
-        if text_width(candidate) > available - 4:
+        available = width - (measured_width(first_prefix) if len(lines) == 1 else 0)
+        if measured_width(candidate) > available - 4:
             if not lines[-1] or len(lines) == 2:
                 raise NoticeInputError(f"{field} exceeds the approved two-line space; human review required")
             lines.append(word)
-            if text_width(word) > width - 4:
+            if measured_width(word) > width - 4:
                 raise NoticeInputError(f"{field} contains a word too wide for the form")
         else:
             lines[-1] = candidate
@@ -200,7 +213,7 @@ def fields_for_case(data):
         "PAYMENT_STREET": fit(p_street, 420, "Payment street"),
         "PAYMENT_CITY": fit(p_city, 420, "Payment city/state/ZIP"),
         "PAYMENT_PHONE": fit(phone, 415, "Payment phone"),
-        "PROVIDER_STREET": fit(provider_street, 375, "Housing-provider street"),
+        "PROVIDER_STREET": provider_street_lines(provider_street),
         "PROVIDER_CITY": fit(provider_city, 375, "Housing-provider city/state/ZIP"),
         "PROVIDER_PHONE": fit(clean(data.get("housing_provider_phone")) or phone, 325, "Housing-provider phone"),
     })

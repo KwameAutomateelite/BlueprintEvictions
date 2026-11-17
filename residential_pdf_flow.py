@@ -47,6 +47,7 @@ def wrap_period(text):
 
 
 def plan_pages(values, row_count):
+    provider_extra = values["PROVIDER_STREET"].count("\n") * 14.0
     pages = [[{"kind": "segment", "source": 0, "top": 92, "bottom": 312,
                "at": 92, "fields": True, "label": "premises and introduction"}]]
     cursor = 312.0
@@ -111,7 +112,7 @@ def plan_pages(values, row_count):
         (1, 237, 333, 14, "abandoned property paragraph"),
         (1, 348, 389, 15, "unlawful detainer paragraph"),
         (1, 403, 444, 14, "superseded notices paragraph"),
-        (1, 472, 602, 28, "signature and housing provider contact"),
+        (1, 472, 602 + provider_extra, 28, "signature and housing provider contact"),
     ]:
         segment(source, top, bottom, gap, label)
     return pages
