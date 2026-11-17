@@ -1,4 +1,5 @@
 print("STARTUP: importing stdlib...", flush=True)
+import asyncio
 import json
 import logging
 import os
@@ -561,7 +562,7 @@ async def health():
     from residential_pdf import PDF_TEMPLATE_VERSION
     from residential_pdf_flow import RENDERER_VERSION
     from retainer_draft import VERIFICATION_VERSION, APPEARANCE_VERSION, COUNTY_VERSION, PREPARATION_VERSION, SIGNING_FIELDS_VERSION
-    return {"status": "ok", "service": "dropbox-sign-service", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True, "residential_rent_pagination": RENDERER_VERSION, "retainer_verification_version": VERIFICATION_VERSION, "retainer_appearance_version": APPEARANCE_VERSION, "retainer_county_version": COUNTY_VERSION, "retainer_preparation_version": PREPARATION_VERSION, "retainer_signing_fields_version": SIGNING_FIELDS_VERSION}
+    return {"status": "ok", "service": "dropbox-sign-service", "signature_callback_protocol_version": "all-authenticated-events-2026-11-17-v1", "residential_template_version": TEMPLATE_VERSION, "residential_signer_required": True, "residential_pdf_template_version": PDF_TEMPLATE_VERSION, "residential_saved_word_pdf": True, "residential_rent_pagination": RENDERER_VERSION, "retainer_verification_version": VERIFICATION_VERSION, "retainer_appearance_version": APPEARANCE_VERSION, "retainer_county_version": COUNTY_VERSION, "retainer_preparation_version": PREPARATION_VERSION, "retainer_signing_fields_version": SIGNING_FIELDS_VERSION}
 
 
 @app.get("/debug-template")
@@ -842,26 +843,48 @@ async def send_signature(req: SendSignatureRequest):
 
 @app.post("/signature-callback")
 async def signature_callback(request: Request):
-    """Webhook endpoint that Dropbox Sign calls when a document is signed.
+    """Authenticate each event and acknowledge every successfully handled event.
 
-    Dropbox Sign sends event data as form-encoded with a 'json' field.
-    On event 'signature_request_all_signed', update Airtable Status to 'Signed (A)'.
+    Account callbacks also include events for requests made outside this service.
+    Those events must be acknowledged without guessing a corresponding case.
+    Completion failures remain non-200 so Dropbox Sign can retry them.
     """
     form = await request.form()
-
-    # Dropbox Sign sends the payload in a 'json' form field
     json_str = form.get("json")
-    if not json_str:
-        logger.warning("Callback received with no 'json' field")
-        return {"status": "ignored", "reason": "no json payload"}
+    if not isinstance(json_str, str) or not json_str:
+        raise HTTPException(status_code=400, detail="Signature event payload required")
+    try:
+        payload = json.loads(json_str)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid signature event JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid signature event payload")
 
-    payload = json.loads(json_str)
-    event = payload.get("event", {})
-    event_type = event.get("event_type")
-    # Controlled rollout: existing non-test case handling is preserved.
+    from signature_integrity import verify_event
+    if not verify_event(payload, DROPBOX_SIGN_API_KEY):
+        raise HTTPException(status_code=409, detail="Signature event authentication failed")
+    event = payload["event"]
+    event_type = event["event_type"]
+    logger.info("Dropbox Sign callback: event_type=%s time=%s", event_type, event.get("event_time"))
+
+    # Sent/viewed/signed/cancelled and account events need no completion work.
+    # Returning JSON here caused Dropbox Sign to retry already received events.
+    if event_type not in {"signature_request_all_signed", "signature_request_downloadable"}:
+        return PlainTextResponse("Hello API Event Received")
+
+    signature_request = payload.get("signature_request") or {}
+    if not isinstance(signature_request, dict):
+        raise HTTPException(status_code=400, detail="Invalid signature request payload")
+    metadata = signature_request.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="Invalid signature request metadata")
+    callback_record = metadata.get("record_id")
+    if not callback_record:
+        logger.info("Acknowledged unbound account event; no case was changed")
+        return PlainTextResponse("Hello API Event Received")
+
     bridge_url = os.environ.get("SIGNATURE_STORAGE_BRIDGE_URL", "")
     from signature_rollout import load_rollout
-    callback_record = (payload.get("signature_request", {}).get("metadata") or {}).get("record_id")
     try:
         rollout = load_rollout(callback_record)
     except (ValueError, OSError):
@@ -870,61 +893,27 @@ async def signature_callback(request: Request):
         from signature_callback_service import process_signature_callback
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as provider_client, httpx.AsyncClient(timeout=60) as storage_client, httpx.AsyncClient(timeout=30, headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"}) as airtable_client:
             try:
-                await process_signature_callback(
+                # Finish or return a retryable failure before the provider's timeout.
+                await asyncio.wait_for(process_signature_callback(
                     payload, provider=provider_client, airtable=airtable_client,
                     storage_http=storage_client, api_key=DROPBOX_SIGN_API_KEY,
                     bridge_url=bridge_url,
                     bridge_secret=os.environ.get("SIGNATURE_STORAGE_BRIDGE_SECRET", ""),
                     base_id=AIRTABLE_BASE_ID, table_id=AIRTABLE_TABLE_ID,
                     allowed_records={callback_record},
-                )
+                ), timeout=25)
             except ValueError as exc:
                 logger.warning("Controlled signature callback held: %s", exc)
                 raise HTTPException(status_code=409, detail="Signature completion needs verification")
-            except httpx.HTTPError:
-                logger.warning("Controlled signature callback dependency failed")
+            except (httpx.HTTPError, asyncio.TimeoutError):
+                logger.warning("Controlled signature callback dependency failed or timed out")
                 raise HTTPException(status_code=503, detail="Signature completion dependency unavailable")
         return PlainTextResponse("Hello API Event Received")
 
-    event_time = event.get("event_time")
-
-    logger.info(f"Dropbox Sign callback: event_type={event_type} time={event_time}")
-
-    # Respond to the callback test (Dropbox Sign sends this to verify the endpoint)
-    if event_type == "callback_test":
-        logger.info("Responding to callback_test with 'Hello API Event Received'")
-        return PlainTextResponse("Hello API Event Received")
-
-    # Only act on all-signed events
-    if event_type != "signature_request_all_signed":
-        logger.info(f"Ignoring event type: {event_type}")
-        return {"status": "ignored", "event_type": event_type}
-
-    # Extract metadata with record_id
-    signature_request = payload.get("signature_request", {})
-    metadata = signature_request.get("metadata", {})
-    record_id = metadata.get("record_id")
-    sig_request_id = signature_request.get("signature_request_id", "unknown")
-
-    if not record_id:
-        logger.error(
-            f"No record_id in metadata for signature request {sig_request_id}"
-        )
-        return {"status": "error", "reason": "no record_id in metadata"}
-
-    logger.info(
-        f"All signed for request {sig_request_id}, updating record {record_id}"
-    )
-
-    # Update Airtable
-    await update_airtable_status(record_id, "Signed (A)")
-
-    return {
-        "status": "processed",
-        "event_type": event_type,
-        "record_id": record_id,
-        "signature_request_id": sig_request_id,
-    }
+    # Preserve the existing completion path for cases outside the storage rollout.
+    if event_type == "signature_request_all_signed":
+        await update_airtable_status(callback_record, "Signed (A)")
+    return PlainTextResponse("Hello API Event Received")
 
 
 def _replace_day_count_in_paragraph(paragraph, day_count: int) -> None:
