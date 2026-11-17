@@ -15,11 +15,77 @@ TEMPLATE = Path(__file__).parent / 'templates' / 'santa_clara_retainer.pdf'
 TEMPLATE_SHA = '20457475f9728c3ebf29196414fc20d4006a3e6134315906cce5e6b4ea450927'
 NOTICE_SHA = '202cfbd160a62f7afa74e25983d4389fb4e396ddfd207d025bade463095876e4'
 VERIFICATION_VERSION = 'retainer-office-fields-2026-11-10'
-APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-13-v3'
+APPEARANCE_VERSION = 'retainer-office-appearance-2026-11-16-v4'
 SIGNING_FIELDS_VERSION = 'retainer-six-signing-fields-2026-11-11-v2'
 COUNTY_VERSION = 'retainer-common-county-form-2026-11-10'
 PREPARATION_VERSION = 'retainer-notice-or-eviction-2026-11-11'
 SUPPORTED_COUNTIES = ('Santa Clara', 'Santa Cruz', 'San Benito', 'San Mateo')
+
+
+def _align_first_page_case_labels(writer):
+    """Move only the three printed labels to the corrected input baselines."""
+    forms = writer.pages[0]['/Resources']['/XObject']
+    # Source font sizes are transformed by the template's nested matrices.
+    # These are measured page-coordinate baseline corrections, not font edits.
+    for key, scale, shifts in (
+        ('/X55', 8.500574111938477 / 12, {12: -2.80221252441406}),
+        ('/X56', 8.000099182128906 / 12,
+         {12: -1.34722290039062, 28: .18596801757812}),
+    ):
+        form = forms[key].get_object()
+        stream = ContentStream(form, writer)
+        for args, operator in stream.operations:
+            if operator == b'Tm':
+                y = float(args[5])
+                if y not in shifts:
+                    raise ValueError('First-page case label layout changed')
+                args[5] = FloatObject(y + shifts[y] / scale)
+        replacement = DecodedStreamObject()
+        replacement.update({k: v for k, v in form.items()
+                            if k not in ('/Filter', '/DecodeParms', '/Length')})
+        replacement.set_data(stream.get_data())
+        forms[NameObject(key)] = writer._add_object(replacement)
+
+
+def _first_page_case_appearance(writer, widget, name, value):
+    """Three measured rows inside the original case box, in PDF points.
+
+    The source's 10pt widgets overlap and their baselines drift downwards.
+    Growing their tops for 12pt text does not fix that. Give each input its
+    own row and a real descender allowance instead of pypdf's near-zero
+    baseline. The approved page content, borders and later pages stay intact.
+    """
+    rows = {'SHORT CASE NAME': (115.4, 673.22),
+            'DEFENDANT': (102.2, 661.02),
+            'DEFENDANT STREET ADDRESS': (98.1, 648.82)}
+    if name not in rows:
+        return
+    left, baseline = rows[name]
+    bottom, top, right = baseline - 3, baseline + 9.2, 550
+    font_ref = writer._root_object['/AcroForm']['/DR']['/Font']['/TimesNewRoman']
+    font = font_ref.get_object()
+    try:
+        encoded = value.encode('cp1252')
+    except UnicodeEncodeError:
+        raise ValueError('Case text is outside the template font: ' + name)
+    widths, first = font['/Widths'], int(font['/FirstChar'])
+    if any(ord(c) < 32 for c in value):
+        raise ValueError('Case field must contain one display line: ' + name)
+    if sum(float(widths[c - first]) for c in encoded) * 12 / 1000 > right - left - 4:
+        raise ValueError('Case text exceeds its first-page row: ' + name)
+    widget[NameObject('/Rect')] = RectangleObject((left, bottom, right, top))
+    # Fixed single-line typography; both the saved appearance and an editor
+    # see the same 12pt font and non-overlapping field rectangles.
+    widget[NameObject('/Ff')] = NumberObject(0)
+    ap = DecodedStreamObject()
+    ap.update({NameObject('/Type'): NameObject('/XObject'),
+               NameObject('/Subtype'): NameObject('/Form'),
+               NameObject('/BBox'): RectangleObject((0, 0, right - left, top - bottom)),
+               NameObject('/Resources'): DictionaryObject({NameObject('/Font'):
+                   DictionaryObject({NameObject('/TimesNewRoman'): font_ref})})})
+    ap.set_data((f'q /Tx BMC BT /TimesNewRoman 12 Tf 0 g 2 3 Td '
+                 f'<{encoded.hex()}> Tj ET EMC Q\n').encode('ascii'))
+    widget[NameObject('/AP')] = DictionaryObject({NameObject('/N'): writer._add_object(ap)})
 
 
 def _property_county(value):
@@ -348,11 +414,15 @@ def render_retainer_draft(plan):
         raise ValueError('Retainer fields missing')
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
+    writer.add_metadata({'/MaddyRetainerDraftRecord': plan['record_id'],
+                         '/MaddyRetainerReviewOnly': 'unsigned',
+                         '/MaddyRetainerAppearance': APPEARANCE_VERSION})
     _fill_printed_county(writer, county)
+    _align_first_page_case_labels(writer)
     # The template repeats SHORT CASE NAME as child widgets. pypdf 4 reads
     # their own value when building appearances, not the parent field value.
     # Set both consistently before generating appearances on every page.
-    for page in writer.pages:
+    for page_index, page in enumerate(writer.pages):
         for ref in page.get('/Annots', []):
             widget = ref.get_object()
             field = widget.get('/Parent', widget).get_object()
@@ -385,6 +455,8 @@ def render_retainer_draft(plan):
                 if name in values:
                     widget[NameObject('/V')] = TextStringObject(values[name])
                     writer._update_text_field(widget)
+                    if page_index == 0:
+                        _first_page_case_appearance(writer, widget, name, values[name])
     form = writer._root_object['/AcroForm']
     form[NameObject('/Fields')] = ArrayObject([ref for ref in form['/Fields'] if ref.get_object().get('/T') != 'RESET FORM'])
     _add_verification_fields(writer, verification_fields)
