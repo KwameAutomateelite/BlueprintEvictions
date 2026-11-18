@@ -9,4 +9,7 @@ function mayContainProof(message) {
 function shouldNotifyProofProblem(result) {
   return result.silent!==true&&!['not_a_pos','bad_subject'].includes(result.code);
 }
-module.exports={hasProofIntent,mayContainProof,shouldNotifyProofProblem};
+function shouldNotifyProofGateProblem(result,message) {
+  return result.gate_ok===false&&result.code!=='not_a_pos'&&hasProofIntent(message);
+}
+module.exports={hasProofIntent,mayContainProof,shouldNotifyProofProblem,shouldNotifyProofGateProblem};
