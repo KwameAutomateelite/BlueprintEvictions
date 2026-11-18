@@ -1,6 +1,7 @@
 const a=require('node:assert/strict'),crypto=require('node:crypto');
 const {prepareRetainerPdf}=require('./retainer-pdf-attachment.cjs');
 const {selectRetainerCase}=require('./retainer-case-identity.cjs');
+const {validateRetainerEvidence}=require('./retainer-document-evidence.cjs');
 const bytes=Buffer.alloc(5*1024*1024+17);bytes.write('%PDF-');
 const attachment={'@odata.type':'#microsoft.graph.fileAttachment',id:'test-attachment',name:'Retainer.pdf',contentBytes:bytes.toString('base64')};
 const prepared=prepareRetainerPdf({value:[attachment]});
@@ -34,3 +35,13 @@ a.throws(()=>selectRetainerCase({...adu,property_address:'123 Example Dr, ADU, S
 a.throws(()=>selectRetainerCase({...adu,property_address:'123 Example St, ADU, Santa Clara, CA 95111'},ns,es),/unique/);
 a.throws(()=>selectRetainerCase(v,{...ns,offset:'more'},es),/truncated/);
 console.log('PASS retainer size, original-byte digest, attachment rejection, exact owned binding, reciprocal ADU refinement and conflicting identity holds.');
+
+const classified={document_type:'retainer',signed:true,confidence:1,case_name:name,property_address:address,evidence:'Signed agreement and completion date are visible.'};
+for(const confidence of [1,.95,95,100])a.equal(validateRetainerEvidence({...classified,confidence}).retainer,true);
+for(const confidence of [undefined,null,'100',true,NaN,Infinity,-1,101,0,.94,94])a.throws(()=>validateRetainerEvidence({...classified,confidence}),/confidence|review/);
+for(const signed of [undefined,false,'true',1])a.throws(()=>validateRetainerEvidence({...classified,signed}),/review/);
+for(const field of ['case_name','property_address','evidence'])for(const value of [undefined,null,42,' '])a.throws(()=>validateRetainerEvidence({...classified,[field]:value}),/unreadable/);
+for(const value of [null,[],{},'retainer',{document_type:'unknown'}])a.throws(()=>validateRetainerEvidence(value),/unreadable/);
+a.equal(validateRetainerEvidence({document_type:'notice'}).retainer,false);
+a.equal(validateRetainerEvidence({document_type:'other'}).retainer,false);
+console.log('PASS typed retainer classification, signed identity, finite confidence, incomplete evidence and non-retainer handling.');
