@@ -37,4 +37,15 @@ function verifyServiceApproval(approval,proposal,record,policy) {
  if(JSON.stringify(serviceSnapshot(record))!==JSON.stringify(proposal.case_snapshot))throw Error('Case changed after review; prepare a fresh proof card');
  return true;
 }
-module.exports={premises,samePremises,selectServiceCase,validServiceDate,supportedCureDeadline,serviceSnapshot,verifyServiceApproval};
+function verifiedProofResumeUrl(proposal) {
+ const id=String(proposal?.execution_id||'');
+ const expected='https://blueprintevictions.app.n8n.cloud/webhook-waiting/'+id;
+ if(!/^\d+$/.test(id)||typeof proposal?.resume_url!=='string'||!(proposal.resume_url===expected||proposal.resume_url.startsWith(expected+'?')))throw Error('Proof resume route invalid');
+ return proposal.resume_url;
+}
+function validateServiceClientUpdate(proposal) {
+ if(proposal?.write_mode!=='full'||!supportedCureDeadline(proposal.notice_type))throw Error('The deadline for this notice needs office review before a client update.');
+ if(proposal.service_method!=='posting and mailing')throw Error('The existing client email describes posting and mailing. Office review is needed before another service method can change status.');
+ return true;
+}
+module.exports={premises,samePremises,selectServiceCase,validServiceDate,supportedCureDeadline,serviceSnapshot,verifyServiceApproval,verifiedProofResumeUrl,validateServiceClientUpdate};

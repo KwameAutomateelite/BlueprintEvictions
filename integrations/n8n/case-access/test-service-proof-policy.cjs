@@ -19,3 +19,14 @@ for(const[k,v]of Object.entries({reviewer_email:'unknown@example.test',approval_
 assert.throws(()=>p.verifyServiceApproval(approval,proposal,{...rec,fields:{...rec.fields,'Notice Served':'2026-11-16'}},policy));
 assert.throws(()=>p.verifyServiceApproval(approval,proposal,{...rec,fields:{...rec.fields,'Case Folder ID':'another-folder'}},policy));
 console.log('Service proof: full case/address/unit matching, ambiguity holds, valid dates, supported deadline types and version-bound approval passed.');
+
+const route={execution_id:'12345',resume_url:'https://blueprintevictions.app.n8n.cloud/webhook-waiting/12345?signature=opaque'};
+assert.equal(p.verifiedProofResumeUrl(route),route.resume_url);
+for(const url of ['https://attacker.example/webhook-waiting/12345','https://blueprintevictions.app.n8n.cloud.attacker.example/webhook-waiting/12345','https://blueprintevictions.app.n8n.cloud/webhook-waiting/123456','https://blueprintevictions.app.n8n.cloud/webhook-waiting/12345/other'])assert.throws(()=>p.verifiedProofResumeUrl({...route,resume_url:url}));
+assert.throws(()=>p.verifiedProofResumeUrl({...route,execution_id:'12345/other'}));
+const update={write_mode:'full',notice_type:'3-Day Notice to Pay Rent or Quit',service_method:'posting and mailing'};
+assert(p.validateServiceClientUpdate(update));
+for(const method of ['personal','substituted','mail',null])assert.throws(()=>p.validateServiceClientUpdate({...update,service_method:method}));
+for(const type of ['3-Day Notice to Quit','30-Day Notice','60-Day Notice'])assert.throws(()=>p.validateServiceClientUpdate({...update,notice_type:type}));
+assert.throws(()=>p.validateServiceClientUpdate({...update,write_mode:'served_only'}));
+console.log('Proof approval route and existing client-email service-method guards passed.');
