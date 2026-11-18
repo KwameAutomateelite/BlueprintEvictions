@@ -16,3 +16,8 @@ Active workflows are identified in the business CTO runbook. Inspect their actua
 Readable PDF source text uses the authenticated `/inspect-source-pdf` endpoint, hashes the uploaded bytes, includes actual filled form values and never fetches caller URLs or infers missing facts. Blank scans report an OCR need; a read failure is not absence. Existing source-research and signing approval guards remain independent.
 
 Run `node integrations/n8n/case-access/test-case-access.cjs`, `node integrations/n8n/case-access/test-dispatch-state.cjs`, `node integrations/n8n/case-access/test-service-proof-policy.cjs`, and the PDF/source callback tests before changing these paths.
+
+
+The controlled proof worker now has a candidate Grok review path. It saves and verifies the original PDF before review, keeps the full case/address/unit snapshot, and protects the execution-specific approval callback with n8n Header Auth. The backend returns a filtered review, never its private callback. Exact current proposal/PDF/date/mode/reviewer approval and a fresh case read are required before the existing guarded filing, attachment append and date/status writes. Repeated filing claims are not replayed.
+
+The existing native Airtable client-update email says that service was by posting and mailing. The candidate therefore holds a different service method, unsupported notice deadline or served-only proposal for office review before changing status. It does not change that approved email wording or infer delivery from an Airtable status. The candidate is not yet wired into the live mailbox route; owned-case source extraction and approval holds passed, while native Grok approval, client delivery and the live-route switch remain under acceptance.
