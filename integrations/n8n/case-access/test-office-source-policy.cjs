@@ -9,7 +9,12 @@ for(const page_limit of [0,6,'2',true])a.throws(()=>prepareOfficeRequest({action
 const r=prepareOfficeRequest({action:'search',query:'Example v Tenant'});a.equal(r.request.connected_account_id,'ca_xTN4ckdJ3vdK');a.ok(r.request.arguments.querytext.includes('IsDocument:1'));
 a.throws(()=>normalizeOfficeResponse({successful:false},r),/not mean/);
 const list=normalizeOfficeResponse({successful:true,data:{files:[{Name:'Example.pdf',ServerRelativeUrl:path,Length:'1200'}]}},{action:'files',offset:0});a.equal(list.items[0].path,path);a.equal(list.listing_complete,true);
-const incomplete=normalizeOfficeResponse({successful:true,data:{files:Array(100).fill({Name:'x',ServerRelativeUrl:path})}},{action:'files',offset:100});a.equal(incomplete.listing_complete,false);a.equal(incomplete.next_offset,200);
+const incomplete=normalizeOfficeResponse({successful:true,data:{files:Array(100).fill({Name:'x',ServerRelativeUrl:path})}},{action:'files',offset:100});a.equal(incomplete.listing_complete,false);a.equal(incomplete.next_offset,110);
 const request=prepareOfficeRequest({action:'read',path});
 for(const s3url of ['http://temp.example.r2.cloudflarestorage.com/x','https://evil.example/x','https://user:password@temp.example.r2.cloudflarestorage.com/x'])a.throws(()=>normalizeOfficeResponse({successful:true,data:{content:{name:'Example v. Tenant.pdf',s3url}}},request));
 console.log('PASS fixed case-library scope, traversal/credential-folder rejection, read-only actions, bounded pages, incomplete listings and provider URL boundary.');
+
+const searchResponse={successful:true,data:{search_results:{PrimaryQueryResult:{RelevantResults:{TotalRows:1,RowCount:1,Table:{Rows:[{Cells:[{Key:'Title',Value:'Example'},{Key:'Path',Value:'https://blueprintevictions.sharepoint.com'+path},{Key:'Size',Value:'1234'}]}]}}}}}};
+const sr=normalizeOfficeResponse(searchResponse,r);a.equal(sr.items.length,1);a.equal(sr.items[0].path,path);a.equal(sr.listing_complete,true);
+
+const vm=require('node:vm'),fs=require('node:fs');const source=fs.readFileSync(require.resolve('./office-source-policy.cjs'),'utf8');const sandbox={result:searchResponse,request:r};const isolated=vm.runInNewContext(source+'\nnormalizeOfficeResponse(result,request)',sandbox);a.equal(isolated.items.length,1);a.equal(isolated.items[0].path,path);console.log('PASS sandbox without a browser URL global returns search source paths.');
