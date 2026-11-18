@@ -2057,8 +2057,11 @@ class SavedNoticePdfRequest(BaseModel):
 
 
 class PdfSourceTextRequest(BaseModel):
-    pdf_base64: str = Field(max_length=42_000_000)
+    pdf_base64: str = Field(max_length=112_000_000)
     expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page_start: int = Field(default=1, ge=1, le=2000, strict=True)
+    page_limit: int | None = Field(default=None, ge=1, le=20, strict=True)
+    include_page_pdf: bool = Field(default=False, strict=True)
 
 
 @app.post("/inspect-source-pdf")
@@ -2066,7 +2069,7 @@ async def inspect_source_pdf(req: PdfSourceTextRequest):
     """Read only exact uploaded bytes; never fetch a caller-supplied URL or infer facts."""
     from pdf_source_text import inspect_pdf_source
     try:
-        return await asyncio.to_thread(inspect_pdf_source, req.pdf_base64, req.expected_sha256)
+        return await asyncio.to_thread(inspect_pdf_source, req.pdf_base64, req.expected_sha256, page_start=req.page_start, page_limit=req.page_limit, include_page_pdf=req.include_page_pdf)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

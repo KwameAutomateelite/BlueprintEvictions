@@ -1,0 +1,15 @@
+const a=require('node:assert/strict');
+const {officePath,prepareOfficeRequest,normalizeOfficeResponse}=require('./office-source-policy.cjs');
+const root='/Shared Documents/Data Folder',path=root+'/2026 CASES/Example v. Tenant.pdf';
+a.equal(officePath(path),path);a.equal(officePath(path.replaceAll(' ','%20')),path);
+for(const p of ['https://evil.example/'+path,root+'/../IT/passwords.pdf',root+'/IT/secret.pdf',root+'Other/a.pdf',root+'/2026 CASES/%252e%252e/a.pdf','/personal/info/Documents/a.pdf'])a.throws(()=>officePath(p));
+for(const action of ['send','delete','update','copy','grant'])a.throws(()=>prepareOfficeRequest({action,path}));
+for(const page_start of [0,true,'1',2001])a.throws(()=>prepareOfficeRequest({action:'read',path,page_start}));
+for(const page_limit of [0,6,'2',true])a.throws(()=>prepareOfficeRequest({action:'read',path,page_limit}));
+const r=prepareOfficeRequest({action:'search',query:'Example v Tenant'});a.equal(r.request.connected_account_id,'ca_xTN4ckdJ3vdK');a.ok(r.request.arguments.querytext.includes('IsDocument:1'));
+a.throws(()=>normalizeOfficeResponse({successful:false},r),/not mean/);
+const list=normalizeOfficeResponse({successful:true,data:{files:[{Name:'Example.pdf',ServerRelativeUrl:path,Length:'1200'}]}},{action:'files',offset:0});a.equal(list.items[0].path,path);a.equal(list.listing_complete,true);
+const incomplete=normalizeOfficeResponse({successful:true,data:{files:Array(100).fill({Name:'x',ServerRelativeUrl:path})}},{action:'files',offset:100});a.equal(incomplete.listing_complete,false);a.equal(incomplete.next_offset,200);
+const request=prepareOfficeRequest({action:'read',path});
+for(const s3url of ['http://temp.example.r2.cloudflarestorage.com/x','https://evil.example/x','https://user:password@temp.example.r2.cloudflarestorage.com/x'])a.throws(()=>normalizeOfficeResponse({successful:true,data:{content:{name:'Example v. Tenant.pdf',s3url}}},request));
+console.log('PASS fixed case-library scope, traversal/credential-folder rejection, read-only actions, bounded pages, incomplete listings and provider URL boundary.');
